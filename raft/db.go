@@ -16,7 +16,7 @@ type MongoClient struct {
 }
 
 func GetMongoClient() (*MongoClient, error) {
-	_, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	_, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	credential := options.Credential{
@@ -52,7 +52,7 @@ type OP struct {
 }
 
 func (m *MongoClient) InsertOpLog() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_, err := m.collection_op.InsertOne(ctx, bson.D{{"operation", "add"}, {"timestamp", primitive.Timestamp{T: uint32(time.Now().Unix())}}})
 	return err
@@ -60,7 +60,7 @@ func (m *MongoClient) InsertOpLog() error {
 
 func (m *MongoClient) GetOplog() (*OP, error) {
 	result := OP{}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	err := m.collection_op.FindOne(ctx, bson.M{"timestamp": bson.M{"$gt": primitive.Timestamp{T: uint32(time.Now().Unix())}}}).Decode(&result)
 	return &result, err
@@ -73,7 +73,7 @@ type ServerStatus struct {
 }
 
 func (m *MongoClient) SaveServerStatus(server_id string, seq_id int32) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	_, err := m.collection_status.InsertOne(ctx, bson.D{{"server_id", server_id}, {"seq_id", seq_id}})
 	return err
@@ -81,7 +81,7 @@ func (m *MongoClient) SaveServerStatus(server_id string, seq_id int32) error {
 
 func (m *MongoClient) LoadServerStatus(server_id string) (*ServerStatus, error) {
 	result := ServerStatus{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	err := m.collection_op.FindOne(ctx, bson.M{"server_id": bson.M{"$eq": server_id}}).Decode(&result)
 	return &result, err

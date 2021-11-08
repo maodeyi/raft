@@ -7,7 +7,7 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, term, isleader)args.SeqId <= rf.seq_id
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -209,11 +209,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.Term = rf.currentTerm
 				reply.VoteGranted = false
 			} else {
+				//todo   any time, we will get a server with max seq_id
 				if args.SeqId <= rf.seq_id {
 					reply.Term = rf.currentTerm
 					reply.VoteGranted = false
 				} else {
-					DPrintf("Server %d: grant vote to candidate %d\n", rf.me, args.CandidateId)
+					DPrintf("Server %d: grant vote to candidate %d  args.seqid %d rf.seq_id %d \n", rf.me, args.CandidateId, args.SeqId, rf.seq_id)
 					reply.Term = rf.currentTerm
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
@@ -303,10 +304,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.persist()
 	}
 	rf.mu.Unlock()
-	err := rf.mongoclient.InsertOpLog()
-	if err != nil {
-		DPrintf("mongo InsertOpLog error %v", err)
-	}
+	//err := rf.mongoclient.InsertOpLog()
+	//if err != nil {
+	//	DPrintf("mongo InsertOpLog error %v", err)
+	//}
 	return rf.seq_id, term, isLeader
 }
 
