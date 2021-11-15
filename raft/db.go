@@ -19,13 +19,13 @@ func GetMongoClient() (*MongoClient, error) {
 	_, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	credential := options.Credential{
-		Username: "maodeyi",
-		Password: "!@#$%^&*()",
-	}
+	//credential := options.Credential{
+	//	Username: "maodeyi",
+	//	Password: "!@#$%^&*()",
+	//}
 
-	clientOpts := options.Client().ApplyURI("mongodb://10.198.23.141:27017").SetAuth(credential)
-	client, err := mongo.Connect(context.TODO(), clientOpts)
+	//clientOpts := options.Client().ApplyURI("mongodb://10.198.23.141:27017")//.SetAuth(credential)
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://10.198.23.141:27017"))
 	if err != nil {
 		return nil, err
 	}
