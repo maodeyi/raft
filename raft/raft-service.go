@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	labrpc2 "github.com/maodeyi/raft/labrpc"
+	//labrpc2 "github.com/maodeyi/raft/labrpc"
 	"go.mongodb.org/mongo-driver/mongo"
+	"google.golang.org/grpc"
 	"math/rand"
 	"sync"
 	"time"
 
-	"gitlab.bj.sensetime.com/mercury/protohub/api/raft"
+	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -32,12 +32,12 @@ type ApplyMsg struct {
 }
 
 type HeartBead struct {
-	Term     int
-	LeaderId int
+	Term     int32
+	LeaderId int32
 }
 
 type HeartBeadReply struct {
-	Term    int
+	Term    int32
 	Success bool
 }
 
@@ -48,58 +48,22 @@ const (
 )
 
 type Entry struct {
-	Term    int
+	Term    int32
 	Command interface{}
 }
-//
-////
-//// A Go object implementing a single Raft peer.
-////
-//type Raft struct {
-//	mu          sync.Mutex           // Lock to protect shared access to this peer's state
-//	peers       []*labrpc2.ClientEnd // RPC end points of all peers
-//	persister   *Persister           // Object to hold this peer's persisted state
-//	mongoclient *MongoClient
-//	me          int // this peer's index into peers[]
-//	//dead      int32                // set by Kill()
-//	syncdone bool
-//	// Your data here (2A, 2B, 2C).
-//	// Look at the paper's Figure 2 for a description of what
-//	// state a Raft server must maintain.
-//
-//	currentTerm int
-//	votedFor    int
-//
-//	seq_id int
-//	log    []Entry
-//
-//	state             string
-//	electionTimeout   int
-//	applyCh           chan ApplyMsg
-//	grantVoteCh       chan bool
-//	heartBeatCh       chan bool
-//	subscribeOplogsCh chan bool
-//	leaderCh          chan bool
-//	totalVotes        int
-//	timer             *time.Timer
-//}
 
 type RaftHTTPService struct {
-	mu          sync.Mutex           // Lock to protect shared access to this peer's state
-	peers       []*labrpc2.ClientEnd // RPC end points of all peers
-	persister   *Persister           // Object to hold this peer's persisted state
+	mu          sync.Mutex                   // Lock to protect shared access to this peer's state
+	peers       []raft_api.RaftServiceClient // RPC end points of all peers
+	persister   *Persister                   // Object to hold this peer's persisted state
 	mongoclient *MongoClient
-	me          int // this peer's index into peers[]
-	//dead      int32                // set by Kill()
-	syncdone bool
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	me          int32 // this peer's index into peers[]
+	syncdone    bool
 
-	currentTerm int
-	votedFor    int
+	currentTerm int32
+	votedFor    int32
 
-	seq_id int
+	seq_id int32
 	log    []Entry
 
 	state             string
@@ -113,238 +77,10 @@ type RaftHTTPService struct {
 	timer             *time.Timer
 }
 
-func (rf *RaftHTTPService)Start
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *RaftHTTPService) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	rf.mu.Lock()
-	term = rf.currentTerm
-	if rf.state == Leader {
-		isleader = true
-	}
-	rf.mu.Unlock()
-	return term, isleader
+func NewRaftHTTPService() *RaftHTTPService {
+	rf := &RaftHTTPService{}
+	return rf
 }
-
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *RaftHTTPService) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-}
-
-//
-// restore previously persisted state.
-//
-func (rf *RaftHTTPService) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
-	d.Decode(&rf.currentTerm)
-	d.Decode(&rf.votedFor)
-	d.Decode(&rf.log)
-	rf.seq_id = len(rf.log)
-	if data == nil || len(data) < 1 {
-		return
-	}
-}
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term        int
-	CandidateId int
-	SeqId       int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-}
-
-//
-// example RequestVote RPC handler.
-//
-func (rf *RaftHTTPService) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("Server %d: got RequestVote from candidate %d, args: %+v, current currentTerm: %d, current seq_id: %v\n", rf.me, args.CandidateId, args, rf.currentTerm, rf.seq_id)
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-	} else {
-		if args.Term == rf.currentTerm {
-			if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-				reply.Term = rf.currentTerm
-				reply.VoteGranted = false
-			} else {
-				//todo   any time, we will get a server with max seq_id
-				if args.SeqId <= rf.seq_id {
-					reply.Term = rf.currentTerm
-					reply.VoteGranted = false
-				} else {
-					DPrintf("Server %d: grant vote to candidate %d  args.seqid %d rf.seq_id %d \n", rf.me, args.CandidateId, args.SeqId, rf.seq_id)
-					reply.Term = rf.currentTerm
-					reply.VoteGranted = true
-					rf.votedFor = args.CandidateId
-					rf.persist()
-					rf.setGrantVoteCh()
-				}
-			}
-		} else {
-			rf.convertToFollower(args.Term, -1)
-			DPrintf("Server %d: grant vote to candidate %d\n", rf.me, args.CandidateId)
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = true
-			rf.votedFor = args.CandidateId
-			rf.persist()
-			rf.setGrantVoteCh()
-		}
-	}
-	DPrintf("======= server %d got RequestVote from candidate %d, args: %+v, current seq_id: %v, reply: %+v =======\n", rf.me, args.CandidateId, args, rf.seq_id, reply)
-}
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *RaftHTTPService) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
-//
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-//
-func (rf *RaftHTTPService) Start(command interface{}) (int, int, bool) {
-	rf.mu.Lock()
-	term := rf.currentTerm
-	isLeader := (rf.state == Leader)
-
-	if isLeader {
-		DPrintf("Leader %d: got a new Start task, command: %v\n", rf.me, command)
-		if rf.syncdone == false {
-			rf.syncOpLogs()
-			rf.syncdone = true
-			DPrintf("leader is syncing")
-		}
-		rf.seq_id++
-		rf.log = append(rf.log, Entry{rf.currentTerm, command})
-		err := rf.mongoclient.InsertOpLog()
-		if err != nil {
-			DPrintf("mongo InsertOpLog error %v", err)
-		}
-		rf.persist()
-	}
-	rf.mu.Unlock()
-	//err := rf.mongoclient.InsertOpLog()
-	//if err != nil {
-	//	DPrintf("mongo InsertOpLog error %v", err)
-	//}
-	return rf.seq_id, term, isLeader
-}
-
-//
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-//
-func (rf *RaftHTTPService) Kill() {
-	//atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-//func (rf *Raft) killed() bool {
-//	//z := atomic.LoadInt32(&rf.dead)
-//	//return z == 1
-//}
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -357,14 +93,31 @@ func (rf *RaftHTTPService) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func NewRaftHTTPService(peers []*labrpc2.ClientEnd, me int,
-	persister *Persister) *RaftHTTPService {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
+func (rf *RaftHTTPService) initPeer() (client raft_api.RaftServiceClient, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
+	if err != nil {
+		return nil, err
+	}
+	return raft_api.NewRaftServiceClient(conn), nil
+}
+
+func (rf *RaftHTTPService) Init() error {
+	//todo init peers
+	for i := 0; i < 5; i++ {
+		peerClient, err := rf.initPeer()
+		if err != nil {
+			return err
+		}
+		rf.peers = append(rf.peers, peerClient)
+	}
+
+	//todo persister
+	//rf.persister = persister
+	//rf.me = me
+
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.seq_id = 0 //
@@ -378,7 +131,6 @@ func NewRaftHTTPService(peers []*labrpc2.ClientEnd, me int,
 
 	rf.state = Follower
 	rf.syncdone = false
-	rf.subscribeOpLogs()
 
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
 	rf.grantVoteCh = make(chan bool)
@@ -386,11 +138,16 @@ func NewRaftHTTPService(peers []*labrpc2.ClientEnd, me int,
 	rf.subscribeOplogsCh = make(chan bool)
 	rf.leaderCh = make(chan bool)
 	rf.totalVotes = 0
-	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-	DPrintf("--------------------- Resume server %d persistent state ---------------------\n", rf.me)
+	//todo readPersist
+	//rf.readPersist(persister.ReadRaftState())
+	DPrintf("--------------------- server %d  init state ---------------------\n", rf.me)
+	return nil
+}
 
+func (rf *RaftHTTPService) Run() {
+	rf.subscribeOpLogs()
+	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	go func() {
 		for {
 			time.Sleep(200 * time.Millisecond)
@@ -441,7 +198,150 @@ func NewRaftHTTPService(peers []*labrpc2.ClientEnd, me int,
 			}
 		}
 	}()
-	return rf
+}
+
+// return currentTerm and whether this server
+// believes it is the leader.
+func (rf *RaftHTTPService) GetState() (int32, bool) {
+
+	var term int32
+	var isleader bool
+	// Your code here (2A).
+	rf.mu.Lock()
+	term = rf.currentTerm
+	if rf.state == Leader {
+		isleader = true
+	}
+	rf.mu.Unlock()
+	return term, isleader
+}
+
+//
+// save Raft's persistent state to stable storage,
+// where it can later be retrieved after a crash and restart.
+// see paper's Figure 2 for a description of what should be persistent.
+//
+func (rf *RaftHTTPService) persist() {
+	// Your code here (2C).
+	// Example:
+	// w := new(bytes.Buffer)
+	// e := labgob.NewEncoder(w)
+	// e.Encode(rf.xxx)
+	// e.Encode(rf.yyy)
+	// data := w.Bytes()
+	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+}
+
+//
+// restore previously persisted state.
+//
+func (rf *RaftHTTPService) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
+	rf.seq_id = int32(len(rf.log))
+	if data == nil || len(data) < 1 {
+		return
+	}
+}
+
+type RequestVoteArgs struct {
+	// Your data here (2A, 2B).
+	Term        int
+	CandidateId int
+	SeqId       int
+}
+
+type RequestVoteReply struct {
+	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
+func (rf *RaftHTTPService) RequestVoteChannel(args *raft_api.RequestVoteRequest) *raft_api.RequestVoteResponse {
+	reply := raft_api.RequestVoteResponse{}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("Server %d: got RequestVote from candidate %d, args: %+v, current currentTerm: %d, current seq_id: %v\n", rf.me, args.CandidateId, args, rf.currentTerm, rf.seq_id)
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+	} else {
+		if args.Term == rf.currentTerm {
+			if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+				reply.Term = rf.currentTerm
+				reply.VoteGranted = false
+			} else {
+				//todo   any time, we will get a server with max seq_id
+				if args.SeqId <= rf.seq_id {
+					reply.Term = rf.currentTerm
+					reply.VoteGranted = false
+				} else {
+					DPrintf("Server %d: grant vote to candidate %d  args.seqid %d rf.seq_id %d \n", rf.me, args.CandidateId, args.SeqId, rf.seq_id)
+					reply.Term = rf.currentTerm
+					reply.VoteGranted = true
+					rf.votedFor = args.CandidateId
+					rf.persist()
+					rf.setGrantVoteCh()
+				}
+			}
+		} else {
+			rf.convertToFollower(args.Term, -1)
+			DPrintf("Server %d: grant vote to candidate %d\n", rf.me, args.CandidateId)
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+			rf.persist()
+			rf.setGrantVoteCh()
+		}
+	}
+	DPrintf("======= server %d got RequestVote from candidate %d, args: %+v, current seq_id: %v, reply: %+v =======\n", rf.me, args.CandidateId, args, rf.seq_id, reply)
+	return &reply
+}
+
+func (rf *RaftHTTPService) Start(command interface{}) (int32, int32, bool) {
+	rf.mu.Lock()
+	term := rf.currentTerm
+	isLeader := (rf.state == Leader)
+
+	if isLeader {
+		DPrintf("Leader %d: got a new Start task, command: %v\n", rf.me, command)
+		if rf.syncdone == false {
+			rf.syncOpLogs()
+			rf.syncdone = true
+			DPrintf("leader is syncing")
+		}
+		rf.seq_id++
+		rf.log = append(rf.log, Entry{rf.currentTerm, command})
+		err := rf.mongoclient.InsertOpLog()
+		if err != nil {
+			DPrintf("mongo InsertOpLog error %v", err)
+		}
+		rf.persist()
+	}
+	rf.mu.Unlock()
+	//err := rf.mongoclient.InsertOpLog()
+	//if err != nil {
+	//	DPrintf("mongo InsertOpLog error %v", err)
+	//}
+	return rf.seq_id, term, isLeader
+}
+
+func (rf *RaftHTTPService) Kill() {
+	//atomic.StoreInt32(&rf.dead, 1)
 }
 
 func GenerateElectionTimeout(min, max int) int {
@@ -450,7 +350,7 @@ func GenerateElectionTimeout(min, max int) int {
 	return randNum
 }
 
-func (rf *Raft) syncOpLogs() {
+func (rf *RaftHTTPService) syncOpLogs() {
 	for true {
 		addseq_id, err := rf.GetOpLogs()
 		if addseq_id == 1 {
@@ -466,7 +366,7 @@ func (rf *Raft) syncOpLogs() {
 	}
 }
 
-func (rf *Raft) subscribeOpLogs() {
+func (rf *RaftHTTPService) subscribeOpLogs() {
 	go func() {
 		for true {
 			select {
@@ -487,7 +387,7 @@ func (rf *Raft) subscribeOpLogs() {
 	}()
 }
 
-func (rf *Raft) startHeartBeat() {
+func (rf *RaftHTTPService) startHeartBeat() {
 	for {
 		rf.mu.Lock()
 		if rf.state != Leader {
@@ -497,7 +397,7 @@ func (rf *Raft) startHeartBeat() {
 		DPrintf("Leader %d: start sending heartbeat, current term: %d\n", rf.me, rf.currentTerm)
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
-			go func(ii int) {
+			go func(ii int32) {
 				if ii == rf.me {
 					return
 				}
@@ -509,13 +409,12 @@ func (rf *Raft) startHeartBeat() {
 						return
 					}
 
-					args := HeartBead{
-						Term:     rf.currentTerm,
-						LeaderId: rf.me,
+					args := raft_api.HeartBeadRequest{
+						Term:   rf.currentTerm,
+						LeadId: rf.me,
 					}
-					reply := HeartBeadReply{}
 					rf.mu.Unlock()
-					ok := rf.SendHeartBeatReply(ii, &args, &reply)
+					reply, ok := rf.SendHeartBeatReply(ii, &args)
 					if ok {
 						rf.mu.Lock()
 						if reply.Term > rf.currentTerm {
@@ -537,13 +436,13 @@ func (rf *Raft) startHeartBeat() {
 						return
 					}
 				}
-			}(i)
+			}(int32(i))
 		}
 		time.Sleep(1000 * time.Millisecond)
 	}
 }
 
-func (rf *Raft) startRequestVote() {
+func (rf *RaftHTTPService) startRequestVote() {
 	rf.mu.Lock()
 	if rf.state != Candidate {
 		DPrintf("no candiate")
@@ -551,7 +450,12 @@ func (rf *Raft) startRequestVote() {
 		return
 	}
 
-	args := RequestVoteArgs{
+	//args := RequestVoteArgs{
+	//	Term:        rf.currentTerm,
+	//	CandidateId: rf.me,
+	//	SeqId:       rf.seq_id,
+	//}
+	args := raft_api.RequestVoteRequest{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
 		SeqId:       rf.seq_id,
@@ -560,12 +464,11 @@ func (rf *Raft) startRequestVote() {
 	nLeader := 0
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
-		go func(ii int) {
+		go func(ii int32) {
 			if ii == rf.me {
 				return
 			}
-			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(ii, &args, &reply)
+			reply, ok := rf.sendRequestVote(ii, &args)
 			if ok {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
@@ -595,11 +498,22 @@ func (rf *Raft) startRequestVote() {
 			} else {
 				DPrintf("Candidate %d: sending RequestVote to server %d failed\n", rf.me, ii)
 			}
-		}(i)
+		}(int32(i))
 	}
 }
 
-func (rf *Raft) convertToFollower(term int, voteFor int) {
+func (rf *RaftHTTPService) sendRequestVote(server int32, request *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	response, err := rf.peers[server].RequestVote(ctx, request)
+	if err == nil {
+		return response, true
+	} else {
+		return response, false
+	}
+}
+
+func (rf *RaftHTTPService) convertToFollower(term int32, voteFor int32) {
 	rf.currentTerm = term
 	rf.state = Follower
 	rf.totalVotes = 0
@@ -607,23 +521,30 @@ func (rf *Raft) convertToFollower(term int, voteFor int) {
 	rf.persist()
 }
 
-func (rf *Raft) HeartBeat(args *HeartBead, reply *HeartBeadReply) {
+func (rf *RaftHTTPService) HeartBeatChannel(args *raft_api.HeartBeadRequest) *raft_api.HeartBeadResponse {
 	rf.mu.Lock()
+	reply := raft_api.HeartBeadResponse{}
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else {
 		rf.setHeartBeatCh()
-		rf.convertToFollower(args.Term, args.LeaderId)
+		rf.convertToFollower(args.Term, args.LeadId)
 	}
-	DPrintf("======= server %d got HeartBeart from leader %d, args: %+v, current term: %v, reply: %+v =======\n", rf.me, args.LeaderId, args, rf.currentTerm, reply)
-
+	DPrintf("======= server %d got HeartBeart from leader %d, args: %+v, current term: %v, reply: %+v =======\n", rf.me, args.LeadId, args, rf.currentTerm, reply)
+	return &reply
 }
 
-func (rf *Raft) SendHeartBeatReply(server int, args *HeartBead, reply *HeartBeadReply) bool {
-	ok := rf.peers[server].Call("Raft.HeartBeat", args, reply)
-	return ok
+func (rf *RaftHTTPService) SendHeartBeatReply(server int32, request *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	response, err := rf.peers[server].HeartBead(ctx, request)
+	if err == nil {
+		return response, true
+	} else {
+		return response, false
+	}
 }
 
 //func (rf *Raft) Write(args *Write, reply *WriteReply) {
@@ -641,7 +562,7 @@ func (rf *Raft) SendHeartBeatReply(server int, args *HeartBead, reply *HeartBead
 //
 //}
 
-func (rf *Raft) convertToCandidate() {
+func (rf *RaftHTTPService) convertToCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
@@ -651,7 +572,7 @@ func (rf *Raft) convertToCandidate() {
 	rf.persist()
 }
 
-func (rf *Raft) GetOpLogs() (int, error) {
+func (rf *RaftHTTPService) GetOpLogs() (int, error) {
 	_, err := rf.mongoclient.GetOplog()
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -662,12 +583,12 @@ func (rf *Raft) GetOpLogs() (int, error) {
 	return 1, nil
 }
 
-func (rf *Raft) convertToLeader() {
+func (rf *RaftHTTPService) convertToLeader() {
 	//may be election again
 	rf.state = Leader
 }
 
-func (rf *Raft) setHeartBeatCh() {
+func (rf *RaftHTTPService) setHeartBeatCh() {
 	go func() {
 		select {
 		case <-rf.heartBeatCh:
@@ -677,7 +598,7 @@ func (rf *Raft) setHeartBeatCh() {
 	}()
 }
 
-func (rf *Raft) setGrantVoteCh() {
+func (rf *RaftHTTPService) setGrantVoteCh() {
 	go func() {
 		select {
 		case <-rf.grantVoteCh:
@@ -687,7 +608,7 @@ func (rf *Raft) setGrantVoteCh() {
 	}()
 }
 
-func (rf *Raft) setLeaderCh() {
+func (rf *RaftHTTPService) setLeaderCh() {
 	go func() {
 		select {
 		case <-rf.leaderCh:
@@ -697,7 +618,7 @@ func (rf *Raft) setLeaderCh() {
 	}()
 }
 
-func (rf *Raft) drainOldTimer() {
+func (rf *RaftHTTPService) drainOldTimer() {
 	select {
 	case <-rf.timer.C:
 		DPrintf("Server %d: drain the old timer\n", rf.me)
@@ -705,13 +626,10 @@ func (rf *Raft) drainOldTimer() {
 	}
 }
 
-
-func (r RaftHTTPService) RequestVote(ctx context.Context, in *raft.RequestVoteRequest) (*raft.RequestVoteResponse, error) {
-	resp := new(raft.RequestVoteResponse)
-	return resp, nil
+func (rf *RaftHTTPService) RequestVote(ctx context.Context, in *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, error) {
+	return rf.RequestVoteChannel(in), nil
 }
 
-func (r RaftHTTPService) HeartBead(ctx context.Context, in *raft.HeartBeadRequest) (*raft.HeartBeadResponse, error) {
-	resp := new(raft.HeartBeadResponse)
-	return resp, nil
+func (rf *RaftHTTPService) HeartBead(ctx context.Context, in *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, error) {
+	return rf.HeartBeatChannel(in), nil
 }
