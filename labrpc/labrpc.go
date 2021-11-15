@@ -50,7 +50,7 @@ package labrpc
 //
 
 import (
-	labgob2 "github.com/maodeyi/raft-demo/labgob"
+	labgob2 "github.com/maodeyi/raft/labgob"
 )
 import "bytes"
 import "reflect"

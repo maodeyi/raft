@@ -9,7 +9,7 @@ package raft
 //
 
 import (
-	labrpc2 "github.com/maodeyi/raft-demo/labrpc"
+	labrpc2 "github.com/maodeyi/raft/labrpc"
 	"log"
 )
 import "sync"

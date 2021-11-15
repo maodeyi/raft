@@ -5,30 +5,14 @@ import (
 
 	"crypto/tls"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"gitlab.bj.sensetime.com/mercury/protohub/api/raft"
+	"github.com/maodeyi/raft/raft"
+	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
 	"net"
 	"net/http"
 	"strings"
 )
-
-// 定义helloHTTPService并实现约定的接口
-type RaftHTTPService struct{}
-
-// HelloHTTPService Hello HTTP服务
-var RaftService = RaftHTTPService{}
-
-// SayHello 实现Hello服务接口
-func (r RaftHTTPService) RequestVote(ctx context.Context, in *raft.RequestVoteRequest) (*raft.RequestVoteResponse, error) {
-	resp := new(raft.RequestVoteResponse)
-	return resp, nil
-}
-
-func (r RaftHTTPService) HeartBead(ctx context.Context, in *raft.HeartBeadRequest) (*raft.HeartBeadResponse, error) {
-	resp := new(raft.HeartBeadResponse)
-	return resp, nil
-}
 
 func main() {
 	endpoint := ":50052"
@@ -39,13 +23,13 @@ func main() {
 
 	// grpc tls server
 	grpcServer := grpc.NewServer()
-	raft.RegisterRaftServiceServer(grpcServer, RaftService)
+	raft_api.RegisterRaftServiceServer(grpcServer, raft.NewRaftHTTPService())
 
 	// gw server
 	ctx := context.Background()
 	dopts := []grpc.DialOption{}
 	gwmux := runtime.NewServeMux()
-	if err = raft.RegisterRaftServiceHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
+	if err = raft_api.RegisterRaftServiceHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
 		grpclog.Fatalf("Failed to register gw server: %v\n", err)
 	}
 
