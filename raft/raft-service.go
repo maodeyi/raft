@@ -14,6 +14,7 @@ import (
 	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 )
 
+//todo change cluster node info
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -450,11 +451,6 @@ func (rf *RaftHTTPService) startRequestVote() {
 		return
 	}
 
-	//args := RequestVoteArgs{
-	//	Term:        rf.currentTerm,
-	//	CandidateId: rf.me,
-	//	SeqId:       rf.seq_id,
-	//}
 	args := raft_api.RequestVoteRequest{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
@@ -523,6 +519,7 @@ func (rf *RaftHTTPService) convertToFollower(term int32, voteFor int32) {
 
 func (rf *RaftHTTPService) HeartBeatChannel(args *raft_api.HeartBeadRequest) *raft_api.HeartBeadResponse {
 	rf.mu.Lock()
+	//todo change rf.peers
 	reply := raft_api.HeartBeadResponse{}
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
