@@ -5,7 +5,7 @@ SRC = $(shell find . -type f -name '*.go' -not -path "./vendor/*")
 VERSION := v1.2.0
 DATE=$(shell date '+%Y%m%d%H%M%S')
 DESCRIBE=$(shell git describe)
-TARGETS := raft-service
+TARGETS := worker-service proxy-service
 REPO=github.com/maodeyi/raft
 BRANCH=$(shell git rev-parse --abbrev-ref HEAD)
 

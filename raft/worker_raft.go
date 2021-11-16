@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	//labrpc2 "github.com/maodeyi/raft/labrpc"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
 	"math/rand"
@@ -15,22 +14,6 @@ import (
 )
 
 //todo change cluster node info
-//
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in Lab 3 you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh; at that point you can add fields to
-// ApplyMsg, but set CommandValid to false for these other uses.
-//
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-}
 
 type HeartBead struct {
 	Term     int32
@@ -42,11 +25,6 @@ type HeartBeadReply struct {
 	Success bool
 }
 
-type Entry struct {
-	Term    int32
-	Command interface{}
-}
-
 type NodeInfo struct {
 	Id         string
 	Ip         string
@@ -55,7 +33,7 @@ type NodeInfo struct {
 	Role       raft_api.Role
 }
 
-type RaftHTTPService struct {
+type Worker_Raft struct {
 	mu          sync.Mutex                   // Lock to protect shared access to this peer's state
 	peers       []raft_api.RaftServiceClient // RPC end points of all peers
 	clusterInfo map[int]NodeInfo
@@ -71,7 +49,6 @@ type RaftHTTPService struct {
 
 	state             raft_api.Role
 	electionTimeout   int
-	applyCh           chan ApplyMsg
 	grantVoteCh       chan bool
 	heartBeatCh       chan bool
 	subscribeOplogsCh chan bool
@@ -80,25 +57,8 @@ type RaftHTTPService struct {
 	timer             *time.Timer
 }
 
-func NewRaftHTTPService() *RaftHTTPService {
-	rf := &RaftHTTPService{}
-	return rf
-}
-
-//
-// the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
-// have the same order. persister is a place for this server to
-// save its persistent state, and also initially holds the most
-// recent saved state, if any. applyCh is a channel on which the
-// tester or service expects Raft to send ApplyMsg messages.
-// Make() must return quickly, so it should start goroutines
-// for any long-running work.
-//
-
 //todo add worker_id
-func (rf *RaftHTTPService) initPeer() (client raft_api.RaftServiceClient, err error) {
+func (rf *Worker_Raft) initPeer() (client raft_api.RaftServiceClient, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
@@ -121,7 +81,7 @@ func (rf *RaftHTTPService) initPeer() (client raft_api.RaftServiceClient, err er
 	return raft_api.NewRaftServiceClient(conn), nil
 }
 
-func (rf *RaftHTTPService) Init() error {
+func (rf *Worker_Raft) Init() error {
 	rf.clusterInfo = make(map[int]NodeInfo)
 	//todo init peers
 	for i := 0; i < 5; i++ {
@@ -163,7 +123,7 @@ func (rf *RaftHTTPService) Init() error {
 	return nil
 }
 
-func (rf *RaftHTTPService) Run() {
+func (rf *Worker_Raft) Run() {
 	rf.subscribeOpLogs()
 	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	go func() {
@@ -220,7 +180,7 @@ func (rf *RaftHTTPService) Run() {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *RaftHTTPService) GetState() (int32, bool) {
+func (rf *Worker_Raft) GetState() (int32, bool) {
 	var term int32
 	var isleader bool
 	// Your code here (2A).
@@ -233,21 +193,7 @@ func (rf *RaftHTTPService) GetState() (int32, bool) {
 	return term, isleader
 }
 
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *RaftHTTPService) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-
+func (rf *Worker_Raft) persist() {
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -257,10 +203,7 @@ func (rf *RaftHTTPService) persist() {
 	rf.persister.SaveRaftState(data)
 }
 
-//
-// restore previously persisted state.
-//
-func (rf *RaftHTTPService) readPersist(data []byte) {
+func (rf *Worker_Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -288,7 +231,7 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-func (rf *RaftHTTPService) RequestVoteChannel(args *raft_api.RequestVoteRequest) *raft_api.RequestVoteResponse {
+func (rf *Worker_Raft) RequestVoteChannel(args *raft_api.RequestVoteRequest) *raft_api.RequestVoteResponse {
 	reply := raft_api.RequestVoteResponse{}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -357,7 +300,7 @@ func (rf *RaftHTTPService) RequestVoteChannel(args *raft_api.RequestVoteRequest)
 //	return rf.seq_id, term, isLeader
 //}
 
-func (rf *RaftHTTPService) Kill() {
+func (rf *Worker_Raft) Kill() {
 	//atomic.StoreInt32(&rf.dead, 1)
 }
 
@@ -367,7 +310,7 @@ func GenerateElectionTimeout(min, max int) int {
 	return randNum
 }
 
-func (rf *RaftHTTPService) syncOpLogs() {
+func (rf *Worker_Raft) syncOpLogs() {
 	for true {
 		addseq_id, err := rf.GetOpLogs()
 		if addseq_id == 1 {
@@ -383,7 +326,7 @@ func (rf *RaftHTTPService) syncOpLogs() {
 	}
 }
 
-func (rf *RaftHTTPService) subscribeOpLogs() {
+func (rf *Worker_Raft) subscribeOpLogs() {
 	go func() {
 		for true {
 			select {
@@ -404,7 +347,7 @@ func (rf *RaftHTTPService) subscribeOpLogs() {
 	}()
 }
 
-func (rf *RaftHTTPService) startHeartBeat() {
+func (rf *Worker_Raft) startHeartBeat() {
 	for {
 		rf.mu.Lock()
 		if rf.state != raft_api.Role_MASTER {
@@ -459,7 +402,7 @@ func (rf *RaftHTTPService) startHeartBeat() {
 	}
 }
 
-func (rf *RaftHTTPService) startRequestVote() {
+func (rf *Worker_Raft) startRequestVote() {
 	rf.mu.Lock()
 	if rf.state != raft_api.Role_Candidate {
 		DPrintf("no candiate")
@@ -514,7 +457,7 @@ func (rf *RaftHTTPService) startRequestVote() {
 	}
 }
 
-func (rf *RaftHTTPService) sendRequestVote(server int32, request *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, bool) {
+func (rf *Worker_Raft) sendRequestVote(server int32, request *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	response, err := rf.peers[server].RequestVote(ctx, request)
@@ -525,7 +468,7 @@ func (rf *RaftHTTPService) sendRequestVote(server int32, request *raft_api.Reque
 	}
 }
 
-func (rf *RaftHTTPService) convertToFollower(term int32, voteFor int32) {
+func (rf *Worker_Raft) convertToFollower(term int32, voteFor int32) {
 	rf.currentTerm = term
 	rf.state = raft_api.Role_SLAVE
 	rf.totalVotes = 0
@@ -533,7 +476,7 @@ func (rf *RaftHTTPService) convertToFollower(term int32, voteFor int32) {
 	rf.persist()
 }
 
-func (rf *RaftHTTPService) HeartBeatChannel(args *raft_api.HeartBeadRequest) *raft_api.HeartBeadResponse {
+func (rf *Worker_Raft) HeartBeatChannel(args *raft_api.HeartBeadRequest) *raft_api.HeartBeadResponse {
 	rf.mu.Lock()
 	//todo change rf.peers
 	reply := raft_api.HeartBeadResponse{}
@@ -549,7 +492,7 @@ func (rf *RaftHTTPService) HeartBeatChannel(args *raft_api.HeartBeadRequest) *ra
 	return &reply
 }
 
-func (rf *RaftHTTPService) SendHeartBeatReply(server int32, request *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, bool) {
+func (rf *Worker_Raft) SendHeartBeatReply(server int32, request *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	response, err := rf.peers[server].HeartBead(ctx, request)
@@ -560,22 +503,7 @@ func (rf *RaftHTTPService) SendHeartBeatReply(server int32, request *raft_api.He
 	}
 }
 
-//func (rf *Raft) Write(args *Write, reply *WriteReply) {
-//	rf.mu.Lock()
-//	loga := Entry{
-//		Term:    rf.currentTerm,
-//		Command: args,
-//	}
-//	rf.log = append(rf.log, loga)
-//	rf.seq_id++
-//	rf.mu.Unlock()
-//}
-//
-//func (rf *Raft) Read(args *Read, reply *ReadReply) {
-//
-//}
-
-func (rf *RaftHTTPService) convertToCandidate() {
+func (rf *Worker_Raft) convertToCandidate() {
 	rf.state = raft_api.Role_Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
@@ -585,7 +513,7 @@ func (rf *RaftHTTPService) convertToCandidate() {
 	rf.persist()
 }
 
-func (rf *RaftHTTPService) GetOpLogs() (int, error) {
+func (rf *Worker_Raft) GetOpLogs() (int, error) {
 	_, err := rf.mongoclient.GetOplog()
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -596,12 +524,12 @@ func (rf *RaftHTTPService) GetOpLogs() (int, error) {
 	return 1, nil
 }
 
-func (rf *RaftHTTPService) convertToLeader() {
+func (rf *Worker_Raft) convertToLeader() {
 	//may be election again
 	rf.state = raft_api.Role_MASTER
 }
 
-func (rf *RaftHTTPService) setHeartBeatCh() {
+func (rf *Worker_Raft) setHeartBeatCh() {
 	go func() {
 		select {
 		case <-rf.heartBeatCh:
@@ -611,7 +539,7 @@ func (rf *RaftHTTPService) setHeartBeatCh() {
 	}()
 }
 
-func (rf *RaftHTTPService) setGrantVoteCh() {
+func (rf *Worker_Raft) setGrantVoteCh() {
 	go func() {
 		select {
 		case <-rf.grantVoteCh:
@@ -621,7 +549,7 @@ func (rf *RaftHTTPService) setGrantVoteCh() {
 	}()
 }
 
-func (rf *RaftHTTPService) setLeaderCh() {
+func (rf *Worker_Raft) setLeaderCh() {
 	go func() {
 		select {
 		case <-rf.leaderCh:
@@ -631,87 +559,10 @@ func (rf *RaftHTTPService) setLeaderCh() {
 	}()
 }
 
-func (rf *RaftHTTPService) drainOldTimer() {
+func (rf *Worker_Raft) drainOldTimer() {
 	select {
 	case <-rf.timer.C:
 		DPrintf("Server %d: drain the old timer\n", rf.me)
 	default:
 	}
-}
-
-func (rf *RaftHTTPService) RequestVote(ctx context.Context, in *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, error) {
-	return rf.RequestVoteChannel(in), nil
-}
-
-func (rf *RaftHTTPService) HeartBead(ctx context.Context, in *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, error) {
-	return rf.HeartBeatChannel(in), nil
-}
-
-func (rf *RaftHTTPService) Write(ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, error) {
-	resp := &raft_api.WriteResponse{
-		ClusterInfo: &raft_api.ClusterInfo{},
-	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	for _, v := range rf.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
-	}
-
-	resp.Role = rf.state
-
-	//todo mongo do not need lock
-	if rf.state == raft_api.Role_MASTER {
-		err := rf.mongoclient.InsertOpLog()
-		if err != nil {
-			return resp, err
-		}
-		rf.seq_id++
-	}
-	return resp, nil
-}
-
-func (rf *RaftHTTPService) Read(ctx context.Context, in *raft_api.ReadRequest) (*raft_api.ReadResponse, error) {
-	resp := &raft_api.ReadResponse{ClusterInfo: &raft_api.ClusterInfo{}}
-
-	rf.mu.Lock()
-	for _, v := range rf.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
-	}
-
-	resp.Role = rf.state
-	rf.mu.Unlock()
-
-	return resp, nil
-}
-
-func (rf *RaftHTTPService) GetClusterInfo(ctx context.Context, in *raft_api.GetClusterInfoRequest) (*raft_api.GetClusterInfoResponse, error) {
-	resp := &raft_api.GetClusterInfoResponse{}
-	rf.mu.Lock()
-	for _, v := range rf.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.NodeInfo = append(resp.NodeInfo, nodeInfo)
-	}
-	rf.mu.Lock()
-	return resp, nil
-
 }

@@ -23,10 +23,10 @@ func main() {
 
 	// grpc tls server
 	grpcServer := grpc.NewServer()
-	raftService := raft.NewRaftHTTPService()
-	raftService.Init()
-	raftService.Run()
-	raft_api.RegisterRaftServiceServer(grpcServer, raftService)
+	worker := raft.NewWorker()
+	worker.Init()
+	worker.Run()
+	raft_api.RegisterRaftServiceServer(grpcServer, worker)
 
 	// gw server
 	ctx := context.Background()
