@@ -42,21 +42,24 @@ type HeartBeadReply struct {
 	Success bool
 }
 
-const (
-	Follower  string = "follower"
-	Candidate        = "candidate"
-	Leader           = "leader"
-)
-
 type Entry struct {
 	Term    int32
 	Command interface{}
 }
 
+type NodeInfo struct {
+	Id         string
+	Ip         string
+	Port       string
+	LastStatus bool
+	Role       raft_api.Role
+}
+
 type RaftHTTPService struct {
 	mu          sync.Mutex                   // Lock to protect shared access to this peer's state
 	peers       []raft_api.RaftServiceClient // RPC end points of all peers
-	persister   *Persister                   // Object to hold this peer's persisted state
+	clusterInfo map[int]NodeInfo
+	persister   *Persister // Object to hold this peer's persisted state
 	mongoclient *MongoClient
 	me          int32 // this peer's index into peers[]
 	syncdone    bool
@@ -65,9 +68,8 @@ type RaftHTTPService struct {
 	votedFor    int32
 
 	seq_id int32
-	log    []Entry
 
-	state             string
+	state             raft_api.Role
 	electionTimeout   int
 	applyCh           chan ApplyMsg
 	grantVoteCh       chan bool
@@ -95,17 +97,32 @@ func NewRaftHTTPService() *RaftHTTPService {
 // for any long-running work.
 //
 
+//todo add worker_id
 func (rf *RaftHTTPService) initPeer() (client raft_api.RaftServiceClient, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	nodeInfo := NodeInfo{
+		Id:   "1",
+		Ip:   "127.0.0.1",
+		Port: "8080",
+		Role: raft_api.Role_SLAVE,
+	}
 	if err != nil {
+		nodeInfo.LastStatus = false
+		rf.clusterInfo[0] = nodeInfo
 		return nil, err
 	}
+	nodeInfo.LastStatus = true
+	rf.clusterInfo[0] = nodeInfo
 	return raft_api.NewRaftServiceClient(conn), nil
 }
 
 func (rf *RaftHTTPService) Init() error {
+	rf.clusterInfo = make(map[int]NodeInfo)
 	//todo init peers
 	for i := 0; i < 5; i++ {
 		peerClient, err := rf.initPeer()
@@ -122,7 +139,7 @@ func (rf *RaftHTTPService) Init() error {
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.seq_id = 0 //
-	rf.log = []Entry{}
+	//rf.log = []Entry{}
 	var err error
 	rf.mongoclient, err = GetMongoClient()
 	if err != nil {
@@ -130,7 +147,7 @@ func (rf *RaftHTTPService) Init() error {
 		panic(err)
 	}
 
-	rf.state = Follower
+	rf.state = raft_api.Role_SLAVE
 	rf.syncdone = false
 
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
@@ -156,10 +173,10 @@ func (rf *RaftHTTPService) Run() {
 			state := rf.state
 			rf.mu.Unlock()
 			switch {
-			case state == Leader:
+			case state == raft_api.Role_MASTER:
 				DPrintf("Candidate %d: l become leader now!!! Current term is %d\n", rf.me, rf.currentTerm)
 				rf.startHeartBeat()
-			case state == Candidate:
+			case state == raft_api.Role_Candidate:
 				DPrintf("================ Candidate %d start election!!! ================\n", rf.me)
 				go rf.startRequestVote()
 				select {
@@ -171,7 +188,7 @@ func (rf *RaftHTTPService) Run() {
 				case <-rf.leaderCh:
 				case <-rf.timer.C:
 					rf.mu.Lock()
-					if rf.state == Follower {
+					if rf.state == raft_api.Role_SLAVE {
 						DPrintf("Candidate %d: existing a higher term candidate, withdraw from the election\n", rf.me)
 						rf.mu.Unlock()
 						continue
@@ -179,7 +196,7 @@ func (rf *RaftHTTPService) Run() {
 					rf.convertToCandidate()
 					rf.mu.Unlock()
 				}
-			case state == Follower:
+			case state == raft_api.Role_SLAVE:
 				rf.mu.Lock()
 				rf.drainOldTimer()
 				rf.electionTimeout = GenerateElectionTimeout(200, 400)
@@ -204,13 +221,12 @@ func (rf *RaftHTTPService) Run() {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *RaftHTTPService) GetState() (int32, bool) {
-
 	var term int32
 	var isleader bool
 	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.currentTerm
-	if rf.state == Leader {
+	if rf.state == raft_api.Role_MASTER {
 		isleader = true
 	}
 	rf.mu.Unlock()
@@ -236,7 +252,7 @@ func (rf *RaftHTTPService) persist() {
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	//e.Encode(rf.log)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -252,8 +268,8 @@ func (rf *RaftHTTPService) readPersist(data []byte) {
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
-	d.Decode(&rf.log)
-	rf.seq_id = int32(len(rf.log))
+	//d.Decode(&rf.log)
+	//rf.seq_id = int32(len(rf.log))
 	if data == nil || len(data) < 1 {
 		return
 	}
@@ -313,33 +329,33 @@ func (rf *RaftHTTPService) RequestVoteChannel(args *raft_api.RequestVoteRequest)
 	return &reply
 }
 
-func (rf *RaftHTTPService) Start(command interface{}) (int32, int32, bool) {
-	rf.mu.Lock()
-	term := rf.currentTerm
-	isLeader := (rf.state == Leader)
-
-	if isLeader {
-		DPrintf("Leader %d: got a new Start task, command: %v\n", rf.me, command)
-		if rf.syncdone == false {
-			rf.syncOpLogs()
-			rf.syncdone = true
-			DPrintf("leader is syncing")
-		}
-		rf.seq_id++
-		rf.log = append(rf.log, Entry{rf.currentTerm, command})
-		err := rf.mongoclient.InsertOpLog()
-		if err != nil {
-			DPrintf("mongo InsertOpLog error %v", err)
-		}
-		rf.persist()
-	}
-	rf.mu.Unlock()
-	//err := rf.mongoclient.InsertOpLog()
-	//if err != nil {
-	//	DPrintf("mongo InsertOpLog error %v", err)
-	//}
-	return rf.seq_id, term, isLeader
-}
+//func (rf *RaftHTTPService) Start(command interface{}) (int32, int32, bool) {
+//	rf.mu.Lock()
+//	term := rf.currentTerm
+//	isLeader := (rf.state == raft_api.Role_MASTER)
+//
+//	if isLeader {
+//		DPrintf("Leader %d: got a new Start task, command: %v\n", rf.me, command)
+//		if rf.syncdone == false {
+//			rf.syncOpLogs()
+//			rf.syncdone = true
+//			DPrintf("leader is syncing")
+//		}
+//		rf.seq_id++
+//		//rf.log = append(rf.log, Entry{rf.currentTerm, command})
+//		err := rf.mongoclient.InsertOpLog()
+//		if err != nil {
+//			DPrintf("mongo InsertOpLog error %v", err)
+//		}
+//		rf.persist()
+//	}
+//	rf.mu.Unlock()
+//	//err := rf.mongoclient.InsertOpLog()
+//	//if err != nil {
+//	//	DPrintf("mongo InsertOpLog error %v", err)
+//	//}
+//	return rf.seq_id, term, isLeader
+//}
 
 func (rf *RaftHTTPService) Kill() {
 	//atomic.StoreInt32(&rf.dead, 1)
@@ -391,7 +407,7 @@ func (rf *RaftHTTPService) subscribeOpLogs() {
 func (rf *RaftHTTPService) startHeartBeat() {
 	for {
 		rf.mu.Lock()
-		if rf.state != Leader {
+		if rf.state != raft_api.Role_MASTER {
 			rf.mu.Unlock()
 			return
 		}
@@ -405,7 +421,7 @@ func (rf *RaftHTTPService) startHeartBeat() {
 				for {
 					time.Sleep(200 * time.Millisecond)
 					rf.mu.Lock()
-					if rf.state != Leader {
+					if rf.state != raft_api.Role_MASTER {
 						rf.mu.Unlock()
 						return
 					}
@@ -426,7 +442,7 @@ func (rf *RaftHTTPService) startHeartBeat() {
 							rf.mu.Unlock()
 							return
 						}
-						if rf.currentTerm != args.Term || rf.state != Leader {
+						if rf.currentTerm != args.Term || rf.state != raft_api.Role_MASTER {
 							rf.mu.Unlock()
 							return
 						}
@@ -445,7 +461,7 @@ func (rf *RaftHTTPService) startHeartBeat() {
 
 func (rf *RaftHTTPService) startRequestVote() {
 	rf.mu.Lock()
-	if rf.state != Candidate {
+	if rf.state != raft_api.Role_Candidate {
 		DPrintf("no candiate")
 		rf.mu.Unlock()
 		return
@@ -473,7 +489,7 @@ func (rf *RaftHTTPService) startRequestVote() {
 					return
 				}
 
-				if rf.currentTerm != args.Term || rf.state != Candidate {
+				if rf.currentTerm != args.Term || rf.state != raft_api.Role_Candidate {
 					rf.mu.Unlock()
 					return
 				}
@@ -481,7 +497,7 @@ func (rf *RaftHTTPService) startRequestVote() {
 				if reply.VoteGranted {
 					rf.totalVotes++
 
-					if nLeader == 0 && rf.totalVotes > len(rf.peers)/2 && rf.state == Candidate {
+					if nLeader == 0 && rf.totalVotes > len(rf.peers)/2 && rf.state == raft_api.Role_Candidate {
 						nLeader++
 						//todo to do syncoplogs take long time ,so other follower election again????,
 						rf.subscribeOplogsCh <- false
@@ -511,7 +527,7 @@ func (rf *RaftHTTPService) sendRequestVote(server int32, request *raft_api.Reque
 
 func (rf *RaftHTTPService) convertToFollower(term int32, voteFor int32) {
 	rf.currentTerm = term
-	rf.state = Follower
+	rf.state = raft_api.Role_SLAVE
 	rf.totalVotes = 0
 	rf.votedFor = voteFor
 	rf.persist()
@@ -560,7 +576,7 @@ func (rf *RaftHTTPService) SendHeartBeatReply(server int32, request *raft_api.He
 //}
 
 func (rf *RaftHTTPService) convertToCandidate() {
-	rf.state = Candidate
+	rf.state = raft_api.Role_Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.totalVotes = 1
@@ -582,7 +598,7 @@ func (rf *RaftHTTPService) GetOpLogs() (int, error) {
 
 func (rf *RaftHTTPService) convertToLeader() {
 	//may be election again
-	rf.state = Leader
+	rf.state = raft_api.Role_MASTER
 }
 
 func (rf *RaftHTTPService) setHeartBeatCh() {
@@ -629,4 +645,73 @@ func (rf *RaftHTTPService) RequestVote(ctx context.Context, in *raft_api.Request
 
 func (rf *RaftHTTPService) HeartBead(ctx context.Context, in *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, error) {
 	return rf.HeartBeatChannel(in), nil
+}
+
+func (rf *RaftHTTPService) Write(ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, error) {
+	resp := &raft_api.WriteResponse{
+		ClusterInfo: &raft_api.ClusterInfo{},
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for _, v := range rf.clusterInfo {
+		nodeInfo := &raft_api.NodeInfo{
+			Id:         v.Id,
+			Ip:         v.Ip,
+			Port:       v.Port,
+			LastStatus: v.LastStatus,
+			Role:       v.Role,
+		}
+		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
+	}
+
+	resp.Role = rf.state
+
+	//todo mongo do not need lock
+	if rf.state == raft_api.Role_MASTER {
+		err := rf.mongoclient.InsertOpLog()
+		if err != nil {
+			return resp, err
+		}
+		rf.seq_id++
+	}
+	return resp, nil
+}
+
+func (rf *RaftHTTPService) Read(ctx context.Context, in *raft_api.ReadRequest) (*raft_api.ReadResponse, error) {
+	resp := &raft_api.ReadResponse{ClusterInfo: &raft_api.ClusterInfo{}}
+
+	rf.mu.Lock()
+	for _, v := range rf.clusterInfo {
+		nodeInfo := &raft_api.NodeInfo{
+			Id:         v.Id,
+			Ip:         v.Ip,
+			Port:       v.Port,
+			LastStatus: v.LastStatus,
+			Role:       v.Role,
+		}
+		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
+	}
+
+	resp.Role = rf.state
+	rf.mu.Unlock()
+
+	return resp, nil
+}
+
+func (rf *RaftHTTPService) GetClusterInfo(ctx context.Context, in *raft_api.GetClusterInfoRequest) (*raft_api.GetClusterInfoResponse, error) {
+	resp := &raft_api.GetClusterInfoResponse{}
+	rf.mu.Lock()
+	for _, v := range rf.clusterInfo {
+		nodeInfo := &raft_api.NodeInfo{
+			Id:         v.Id,
+			Ip:         v.Ip,
+			Port:       v.Port,
+			LastStatus: v.LastStatus,
+			Role:       v.Role,
+		}
+		resp.NodeInfo = append(resp.NodeInfo, nodeInfo)
+	}
+	rf.mu.Lock()
+	return resp, nil
+
 }

@@ -113,8 +113,8 @@ github.com/xdg/stringprep v0.0.0-20180714160509-73f8eece6fdc h1:n+nNi93yXLkJvKwX
 github.com/xdg/stringprep v0.0.0-20180714160509-73f8eece6fdc/go.mod h1:Jhud4/sHMO4oL310DaZAKk9ZaJ08SJfe+sJh0HrGL1Y=
 github.com/youmark/pkcs8 v0.0.0-20181117223130-1be2e3e5546d h1:splanxYIlg+5LfHAM6xpdFEAYOk8iySO56hMFq6uLyA=
 github.com/youmark/pkcs8 v0.0.0-20181117223130-1be2e3e5546d/go.mod h1:rHwXgn7JulP+udvsHwJoVG1YGAP6VLg4y9I5dyZdqmA=
-gitlab.bj.sensetime.com/mercury/protohub v0.0.0-20211115070507-fefd30e843cf h1:vW1RqQY8npIe0UPVG5Y5aJdCDauQA05NsiDhiskcJZw=
-gitlab.bj.sensetime.com/mercury/protohub v0.0.0-20211115070507-fefd30e843cf/go.mod h1:3kU0vHgVhpkyX1JzE6fodeXR+04+HMYvLjn70Edk/fQ=
+gitlab.bj.sensetime.com/mercury/protohub v0.0.0-20211116091819-2e1eaaa65f16 h1:P85b0XnO3MhjXjq7pFe8MbsIV4OMt+n/55Z6ru0pTng=
+gitlab.bj.sensetime.com/mercury/protohub v0.0.0-20211116091819-2e1eaaa65f16/go.mod h1:3kU0vHgVhpkyX1JzE6fodeXR+04+HMYvLjn70Edk/fQ=
 go.mongodb.org/mongo-driver v1.5.0 h1:REddm85e1Nl0JPXGGhgZkgJdG/yOe6xvpXUcYK5WLt0=
 go.mongodb.org/mongo-driver v1.5.0/go.mod h1:boiGPFqyBs5R0R5qf2ErokGRekMfwn+MqKaUyHs7wy0=
 golang.org/x/crypto v0.0.0-20180904163835-0709b304e793/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
