@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"go.mongodb.org/mongo-driver/mongo"
-	"google.golang.org/grpc"
 	"math/rand"
 	"sync"
 	"time"
+
+	"go.mongodb.org/mongo-driver/mongo"
+	"google.golang.org/grpc"
 
 	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 )

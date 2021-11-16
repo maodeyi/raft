@@ -2,16 +2,18 @@ package main
 
 import (
 	"context"
-
 	"crypto/tls"
-	"github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"github.com/maodeyi/raft/raft"
-	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/grpclog"
 	"net"
 	"net/http"
 	"strings"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/grpclog"
+
+	"github.com/grpc-ecosystem/grpc-gateway/runtime"
+	"github.com/maodeyi/raft/raft"
+
+	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
 )
 
 func main() {
@@ -25,13 +27,13 @@ func main() {
 	grpcServer := grpc.NewServer()
 	proxy := raft.NewProxy()
 	proxy.Init()
-	raft_api.RegisterRaftServiceServer(grpcServer, proxy)
+	raft_proxy.RegisterRaftProxyServer(grpcServer, proxy)
 
 	// gw server
 	ctx := context.Background()
 	dopts := []grpc.DialOption{}
 	gwmux := runtime.NewServeMux()
-	if err = raft_api.RegisterRaftServiceHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
+	if err = raft_proxy.RegisterRaftProxyHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
 		grpclog.Fatalf("Failed to register gw server: %v\n", err)
 	}
 
