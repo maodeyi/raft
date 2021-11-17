@@ -11,11 +11,17 @@ import (
 	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
 )
 
+type Node struct {
+	NodeInfo *raft_api.NodeInfo
+	Client   raft_api.RaftServiceClient
+	Conn     *grpc.ClientConn
+}
+
 type Proxy struct {
-	mu           sync.Mutex
-	rrIndex      int32
-	clusterInfo  raft_api.ClusterInfo
-	workerClents []raft_api.RaftServiceClient
+	mu          sync.Mutex
+	rrIndex     int32
+	clusterInfo map[string]*Node
+	Ids         []string
 }
 
 func NewProxy() *Proxy {
@@ -25,40 +31,50 @@ func NewProxy() *Proxy {
 	return rf
 }
 
-func (s *Proxy) initWorkClient(info *raft_api.NodeInfo) (client raft_api.RaftServiceClient, err error) {
+func (s *Proxy) destoryWorkNode(node *Node) error {
+	return node.Conn.Close()
+}
+
+func (s *Proxy) initWorkNode(nodeInfo *raft_api.NodeInfo) (*Node, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	nodeInfo := &raft_api.NodeInfo{
-		Id:   "1",
-		Ip:   "127.0.0.1",
-		Port: "8080",
-		Role: raft_api.Role_SLAVE,
+	node := &Node{
+		NodeInfo: &raft_api.NodeInfo{
+			Id:   "1",
+			Ip:   "127.0.0.1",
+			Port: "8080",
+			Role: raft_api.Role_SLAVE,
+		},
 	}
+
 	if err != nil {
-		nodeInfo.LastStatus = false
-		s.clusterInfo.NodeInfo[0] = nodeInfo
-		return nil, err
+		node.NodeInfo.LastStatus = false
+	} else {
+		node.NodeInfo.LastStatus = true
+		node.Client = raft_api.NewRaftServiceClient(conn)
+		node.Conn = conn
 	}
-	nodeInfo.LastStatus = true
-	s.clusterInfo.NodeInfo[0] = nodeInfo
-	return raft_api.NewRaftServiceClient(conn), nil
+	s.Ids = append(s.Ids, node.NodeInfo.Id)
+	return node, err
 }
 
 func (s *Proxy) Init() error {
 	//todo init clusterInfo
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, v := range s.clusterInfo.NodeInfo {
-		workerClient, err := s.initWorkClient(v)
+	s.clusterInfo = make(map[string]*Node)
+	//todo init ip port id default slave
+	for _, v := range s.clusterInfo {
+		workerNode, err := s.initWorkNode(v.NodeInfo)
 		if err != nil {
 			DPrintf("proxy inti worker peer error %v", err)
 		}
 
-		s.workerClents = append(s.workerClents, workerClient)
+		s.clusterInfo[v.NodeInfo.Id] = workerNode
 	}
 	return nil
 }
@@ -66,77 +82,94 @@ func (s *Proxy) Init() error {
 func (s *Proxy) roundroubin() raft_api.RaftServiceClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	length := len(s.workerClents)
+	length := len(s.Ids)
 	s.rrIndex++
 	index := s.rrIndex % int32(length)
-	return s.workerClents[index]
+	return s.clusterInfo[s.Ids[index]].Client
+}
+
+func (s *Proxy) nodeIsEqual(src *raft_api.NodeInfo, des *raft_api.NodeInfo) bool {
+	return src.Ip == des.Ip && src.Port == des.Port && src.Id == des.Id
+}
+
+func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	//del
+	length := len(clusterInfo)
+	for _, v := range s.clusterInfo {
+		for index, node := range clusterInfo {
+			if v.NodeInfo.Id == node.Id {
+				break
+			}
+			if index == length-1 {
+				delete(s.clusterInfo, v.NodeInfo.Id)
+			}
+		}
+	}
+
+	for _, v := range clusterInfo {
+		//add
+		node, ok := s.clusterInfo[v.Id]
+		if !ok {
+			node, err := s.initWorkNode(v)
+			if err != nil {
+				DPrintf("initWorkNode error %v", err)
+			}
+			s.clusterInfo[v.Id] = node
+			continue
+		}
+
+		//update
+		if !s.nodeIsEqual(node.NodeInfo, v) {
+			err := s.destoryWorkNode(s.clusterInfo[v.Id])
+			if err != nil {
+				DPrintf("destoryWorkNode error %v", err)
+			}
+			node, err := s.initWorkNode(v)
+			if err != nil {
+				DPrintf("initWorkNode error %v", err)
+			}
+			s.clusterInfo[v.Id] = node
+		} else if s.clusterInfo[v.Id].NodeInfo.Role != v.Role {
+			s.clusterInfo[v.Id].NodeInfo.Role = v.Role
+		}
+	}
 }
 
 func (s *Proxy) Write(ctx context.Context, in *raft_proxy.WriteRequest) (*raft_proxy.WriteResponse, error) {
-	resp := &raft_api.WriteResponse{
-		ClusterInfo: &raft_api.ClusterInfo{},
-	}
-	s.worker_raft.mu.Lock()
-	defer s.worker_raft.mu.Unlock()
-	for _, v := range s.worker_raft.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
+	workerClient := s.roundroubin()
+	req := &raft_api.WriteRequest{}
+	workerResp, err := workerClient.Write(ctx, req)
+	if err != nil {
+		log.Errorf(ctx, "worker write error %v", err)
 	}
 
-	resp.Role = s.worker_raft.state
+	if workerResp.Role != raft_api.Role_SLAVE {
 
-	//todo mongo do not need lock
-	if s.worker_raft.state == raft_api.Role_MASTER {
-		err := s.worker_raft.mongoclient.InsertOpLog()
-		if err != nil {
-			return resp, err
-		}
-		s.worker_raft.seq_id++
 	}
+	clusterInfo := workerResp.ClusterInfo.NodeInfo
+	s.checkClusterInfo(clusterInfo)
+	resp := &raft_proxy.WriteResponse{}
+
 	return resp, nil
 }
 
 func (s *Proxy) Read(ctx context.Context, in *raft_proxy.ReadRequest) (*raft_proxy.ReadResponse, error) {
-	resp := &raft_api.ReadResponse{ClusterInfo: &raft_api.ClusterInfo{}}
-
-	s.worker_raft.mu.Lock()
-	for _, v := range s.worker_raft.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
+	workerClient := s.roundroubin()
+	req := &raft_api.ReadRequest{}
+	workerResp, err := workerClient.Read(ctx, req)
+	if err != nil {
+		log.Errorf(ctx, "worker read error %v", err)
 	}
 
-	resp.Role = s.worker_raft.state
-	s.worker_raft.mu.Unlock()
-
+	clusterInfo := workerResp.ClusterInfo.NodeInfo
+	s.checkClusterInfo(clusterInfo)
+	resp := &raft_proxy.ReadResponse{}
 	return resp, nil
 }
 
 func (s *Proxy) GetClusterInfo(ctx context.Context, in *raft_proxy.GetClusterInfoRequest) (*raft_proxy.GetClusterInfoResponse, error) {
-	resp := &raft_api.GetClusterInfoResponse{}
-	s.worker_raft.mu.Lock()
-	for _, v := range s.worker_raft.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.NodeInfo = append(resp.NodeInfo, nodeInfo)
-	}
-	s.worker_raft.mu.Lock()
-	return resp, nil
-
+	return nil, nil
 }

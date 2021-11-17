@@ -37,6 +37,7 @@ func (s *Worker) Write(ctx context.Context, in *raft_api.WriteRequest) (*raft_ap
 	}
 	s.worker_raft.mu.Lock()
 	defer s.worker_raft.mu.Unlock()
+
 	for _, v := range s.worker_raft.clusterInfo {
 		nodeInfo := &raft_api.NodeInfo{
 			Id:         v.Id,
@@ -51,7 +52,7 @@ func (s *Worker) Write(ctx context.Context, in *raft_api.WriteRequest) (*raft_ap
 	resp.Role = s.worker_raft.state
 
 	//todo mongo do not need lock
-	if s.worker_raft.state == raft_api.Role_MASTER {
+	if s.worker_raft.state == raft_api.Role_MASTER && s.worker_raft.syncdone {
 		err := s.worker_raft.mongoclient.InsertOpLog()
 		if err != nil {
 			return resp, err

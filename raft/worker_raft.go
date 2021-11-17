@@ -315,9 +315,7 @@ func (rf *Worker_Raft) syncOpLogs() {
 	for true {
 		addseq_id, err := rf.GetOpLogs()
 		if addseq_id == 1 {
-			rf.mu.Lock()
 			rf.seq_id++
-			rf.mu.Unlock()
 		} else if addseq_id == 0 && err == nil {
 			return
 		} else if err != nil {
@@ -443,11 +441,15 @@ func (rf *Worker_Raft) startRequestVote() {
 
 					if nLeader == 0 && rf.totalVotes > len(rf.peers)/2 && rf.state == raft_api.Role_Candidate {
 						nLeader++
-						//todo to do syncoplogs take long time ,so other follower election again????,
 						rf.subscribeOplogsCh <- false
-						rf.syncOpLogs()
 						rf.convertToLeader()
 						rf.setLeaderCh()
+						go func() {
+							rf.mu.Lock()
+							rf.syncOpLogs()
+							rf.syncdone = true
+							rf.mu.Unlock()
+						}()
 					}
 				}
 				rf.mu.Unlock()
