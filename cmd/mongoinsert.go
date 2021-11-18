@@ -51,9 +51,10 @@ type Feature struct {
 	Data string             `json:"data"`
 }
 
-func Log() {
+func Log(diff int64) {
 	mutex.Lock()
-	log.Printf("\n cost time :  %f(s) \n total ops : %f(ops) \n iops : %f(ops/s) \n throughput: %f(MB/s)", timeCount*5, total, float32(total)/float32(timeCount*5), float32(total)*4/1024*float32(timeCount*5))
+	diff_ms := diff / 1e6
+	log.Printf("\n cost time :  %f(s) \n total ops : %f(ops) \n iops : %f(ops/s) \n throughput: %f(MB/s)", timeCount*5, total, 1000*float32(total)/float32(diff_ms), float32(total)*4*2/float32(diff_ms))
 	mutex.Unlock()
 }
 
@@ -102,20 +103,21 @@ func main() {
 		ops = append(ops, OP{Operation: RandStringRunes(2048)})
 	}
 
-	ticker := time.NewTicker(time.Second * 5)
-	done := make(chan bool)
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				timeCount++
-				Log()
-			}
-		}
-	}()
+	//ticker := time.NewTicker(time.Second * 5)
+	//done := make(chan bool)
+	//go func() {
+	//	for {
+	//		select {
+	//		case <-done:
+	//			return
+	//		case <-ticker.C:
+	//			timeCount++
+	//			Log()
+	//		}
+	//	}
+	//}()
 
+	start := time.Now().UnixNano()
 	go func() {
 		for true {
 			session, err := client.StartSession()
@@ -154,9 +156,11 @@ func main() {
 
 			total = total + 2*int32(batch_number)
 			if total >= int32(coutNumber) {
-				ticker.Stop()
-				done <- true
-				Log()
+				//ticker.Stop()
+				//done <- true
+				end := time.Now().UnixNano()
+				Log(start - end)
+
 				return
 			}
 		}
@@ -168,7 +172,8 @@ func main() {
 		s := <-ch
 		switch s {
 		case syscall.SIGQUIT:
-			Log()
+			end := time.Now().UnixNano()
+			Log(start - end)
 			return
 		}
 	}
