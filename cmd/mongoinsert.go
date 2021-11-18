@@ -10,8 +10,11 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"log"
 	"math/rand"
+	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -157,4 +160,14 @@ func main() {
 			}
 		}
 	}()
-}
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGSTOP, syscall.SIGUSR1)
+	for {
+		s := <-ch
+		switch s {
+		case syscall.SIGQUIT:
+			Log()
+			return
+		}
+	}
