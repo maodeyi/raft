@@ -53,7 +53,7 @@ type Feature struct {
 
 func Log() {
 	mutex.Lock()
-	log.Printf("cost time :  %f(s) \n total ops : %f(ops) \n iops : %f(ops/s) \n throughput: %f(MB/s)", timeCount*5, total, float32(total)/float32(timeCount*5), float32(total)*4/1024*float32(timeCount*5))
+	log.Printf("\n cost time :  %f(s) \n total ops : %f(ops) \n iops : %f(ops/s) \n throughput: %f(MB/s)", timeCount*5, total, float32(total)/float32(timeCount*5), float32(total)*4/1024*float32(timeCount*5))
 	mutex.Unlock()
 }
 
@@ -78,6 +78,7 @@ func main() {
 	clientOpts := options.Client().ApplyURI("mongodb://mercurycloud-mongo.cluster-cug6uxa3sg6y.us-west-2.docdb.amazonaws.com:27017").SetAuth(credential)
 	client, err := mongo.Connect(context.TODO(), clientOpts)
 	if err != nil {
+		log.Fatalf("mongo connect error %v", log.Fatalf)
 		return
 	}
 
