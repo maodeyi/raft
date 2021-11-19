@@ -26,36 +26,28 @@ type HeartBeadReply struct {
 	Success bool
 }
 
-type NodeInfo struct {
-	Id         string
-	Ip         string
-	Port       string
-	LastStatus bool
-	Role       raft_api.Role
-}
-
 type Worker_Raft struct {
-	mu          sync.Mutex                   // Lock to protect shared access to this peer's state
-	peers       []raft_api.RaftServiceClient // RPC end points of all peers
-	clusterInfo map[int]NodeInfo
+	mu          sync.Mutex                            // Lock to protect shared access to this peer's state
+	peers       map[string]raft_api.RaftServiceClient // RPC end points of all peers
+	clusterInfo []*raft_api.NodeInfo
 	persister   *Persister // Object to hold this peer's persisted state
 	mongoclient *MongoClient
-	me          int32 // this peer's index into peers[]
+	me          string // this peer's index into peers[]
 	syncdone    bool
 
 	currentTerm int32
-	votedFor    int32
+	votedFor    string
 
 	seq_id int32
 
-	state             raft_api.Role
-	electionTimeout   int
-	grantVoteCh       chan bool
-	heartBeatCh       chan bool
-	subscribeOplogsCh chan bool
-	leaderCh          chan bool
-	totalVotes        int
-	timer             *time.Timer
+	state           raft_api.Role
+	electionTimeout int
+	grantVoteCh     chan bool
+	heartBeatCh     chan bool
+	isMasterCh      chan raft_api.Role
+	leaderCh        chan bool
+	totalVotes      int
+	timer           *time.Timer
 }
 
 //todo add worker_id
@@ -66,7 +58,7 @@ func (rf *Worker_Raft) initPeer() (client raft_api.RaftServiceClient, err error)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	nodeInfo := NodeInfo{
+	nodeInfo := &raft_api.NodeInfo{
 		Id:   "1",
 		Ip:   "127.0.0.1",
 		Port: "8080",
@@ -74,23 +66,23 @@ func (rf *Worker_Raft) initPeer() (client raft_api.RaftServiceClient, err error)
 	}
 	if err != nil {
 		nodeInfo.LastStatus = false
-		rf.clusterInfo[0] = nodeInfo
+		rf.clusterInfo = append(rf.clusterInfo, nodeInfo)
 		return nil, err
 	}
 	nodeInfo.LastStatus = true
-	rf.clusterInfo[0] = nodeInfo
+	rf.clusterInfo = append(rf.clusterInfo, nodeInfo)
 	return raft_api.NewRaftServiceClient(conn), nil
 }
 
 func (rf *Worker_Raft) Init() error {
-	rf.clusterInfo = make(map[int]NodeInfo)
+	rf.peers = make(map[string]raft_api.RaftServiceClient)
 	//todo init peers
 	for i := 0; i < 5; i++ {
 		peerClient, err := rf.initPeer()
 		if err != nil {
 			return err
 		}
-		rf.peers = append(rf.peers, peerClient)
+		rf.peers["id"] = peerClient
 	}
 
 	//todo persister
@@ -98,9 +90,8 @@ func (rf *Worker_Raft) Init() error {
 	//rf.me = me
 
 	rf.currentTerm = 0
-	rf.votedFor = -1
-	rf.seq_id = 0 //
-	//rf.log = []Entry{}
+	rf.votedFor = ""
+	rf.seq_id = 0
 	var err error
 	rf.mongoclient, err = GetMongoClient()
 	if err != nil {
@@ -114,7 +105,7 @@ func (rf *Worker_Raft) Init() error {
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
 	rf.grantVoteCh = make(chan bool)
 	rf.heartBeatCh = make(chan bool)
-	rf.subscribeOplogsCh = make(chan bool)
+	rf.isMasterCh = make(chan raft_api.Role)
 	rf.leaderCh = make(chan bool)
 	rf.totalVotes = 0
 	// initialize from state persisted before a crash
@@ -144,7 +135,8 @@ func (rf *Worker_Raft) Run() {
 				case <-rf.heartBeatCh:
 					DPrintf("Candidate %d: receive heartbeat when requesting votes, turn back to follower\n", rf.me)
 					rf.mu.Lock()
-					rf.convertToFollower(rf.currentTerm, -1)
+					rf.convertToFollower(rf.currentTerm, "")
+					rf.isMasterCh <- raft_api.Role_SLAVE
 					rf.mu.Unlock()
 				case <-rf.leaderCh:
 				case <-rf.timer.C:
@@ -240,7 +232,7 @@ func (rf *Worker_Raft) RequestVoteChannel(args *raft_api.RequestVoteRequest) *ra
 		reply.VoteGranted = false
 	} else {
 		if args.Term == rf.currentTerm {
-			if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+			if rf.votedFor != "" && rf.votedFor != args.CandidateId {
 				reply.Term = rf.currentTerm
 				reply.VoteGranted = false
 			} else {
@@ -258,7 +250,7 @@ func (rf *Worker_Raft) RequestVoteChannel(args *raft_api.RequestVoteRequest) *ra
 				}
 			}
 		} else {
-			rf.convertToFollower(args.Term, -1)
+			rf.convertToFollower(args.Term, "")
 			DPrintf("Server %d: grant vote to candidate %d\n", rf.me, args.CandidateId)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
@@ -328,9 +320,11 @@ func (rf *Worker_Raft) subscribeOpLogs() {
 		for true {
 			select {
 			//when raft change into follower from master receive from subscribeOplogsCh
-			case <-rf.subscribeOplogsCh:
-				DPrintf("turn to master stop subcribe and sync log")
-				break
+			case isMaster := <-rf.isMasterCh:
+				if isMaster == raft_api.Role_MASTER {
+					DPrintf("turn to master stop subcribe and sync log")
+					break
+				}
 			default:
 			}
 			time.Sleep(300 * time.Millisecond)
@@ -353,8 +347,9 @@ func (rf *Worker_Raft) startHeartBeat() {
 		}
 		DPrintf("Leader %d: start sending heartbeat, current term: %d\n", rf.me, rf.currentTerm)
 		rf.mu.Unlock()
-		for i := 0; i < len(rf.peers); i++ {
-			go func(ii int32) {
+		for index, _ := range rf.peers {
+			index := index
+			go func(ii string) {
 				if ii == rf.me {
 					return
 				}
@@ -371,14 +366,14 @@ func (rf *Worker_Raft) startHeartBeat() {
 						LeadId: rf.me,
 					}
 					rf.mu.Unlock()
-					reply, ok := rf.SendHeartBeatReply(ii, &args)
+					reply, ok := rf.SendHeartBeatReply(rf.peers[ii], &args)
 					if ok {
 						rf.mu.Lock()
 						if reply.Term > rf.currentTerm {
 							DPrintf("Leader %d: turn back to follower due to existing higher term %d from server %d\n", rf.me, reply.Term, ii)
 							rf.subscribeOpLogs()
 							rf.syncdone = false
-							rf.convertToFollower(reply.Term, -1)
+							rf.convertToFollower(reply.Term, "")
 							rf.mu.Unlock()
 							return
 						}
@@ -393,7 +388,7 @@ func (rf *Worker_Raft) startHeartBeat() {
 						return
 					}
 				}
-			}(int32(i))
+			}(index)
 		}
 		time.Sleep(1000 * time.Millisecond)
 	}
@@ -415,16 +410,17 @@ func (rf *Worker_Raft) startRequestVote() {
 
 	nLeader := 0
 	rf.mu.Unlock()
-	for i := 0; i < len(rf.peers); i++ {
-		go func(ii int32) {
+	for index, _ := range rf.peers {
+		index := index
+		go func(ii string) {
 			if ii == rf.me {
 				return
 			}
-			reply, ok := rf.sendRequestVote(ii, &args)
+			reply, ok := rf.sendRequestVote(rf.peers[index], &args)
 			if ok {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
-					rf.convertToFollower(reply.Term, -1)
+					rf.convertToFollower(reply.Term, "")
 					rf.mu.Unlock()
 					return
 				}
@@ -439,7 +435,7 @@ func (rf *Worker_Raft) startRequestVote() {
 
 					if nLeader == 0 && rf.totalVotes > len(rf.peers)/2 && rf.state == raft_api.Role_Candidate {
 						nLeader++
-						rf.subscribeOplogsCh <- false
+						rf.isMasterCh <- raft_api.Role_MASTER
 						rf.convertToLeader()
 						rf.setLeaderCh()
 						go func() {
@@ -454,14 +450,14 @@ func (rf *Worker_Raft) startRequestVote() {
 			} else {
 				DPrintf("Candidate %d: sending RequestVote to server %d failed\n", rf.me, ii)
 			}
-		}(int32(i))
+		}(index)
 	}
 }
 
-func (rf *Worker_Raft) sendRequestVote(server int32, request *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, bool) {
+func (rf *Worker_Raft) sendRequestVote(client raft_api.RaftServiceClient, request *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	response, err := rf.peers[server].RequestVote(ctx, request)
+	response, err := client.RequestVote(ctx, request)
 	if err == nil {
 		return response, true
 	} else {
@@ -469,7 +465,7 @@ func (rf *Worker_Raft) sendRequestVote(server int32, request *raft_api.RequestVo
 	}
 }
 
-func (rf *Worker_Raft) convertToFollower(term int32, voteFor int32) {
+func (rf *Worker_Raft) convertToFollower(term int32, voteFor string) {
 	rf.currentTerm = term
 	rf.state = raft_api.Role_SLAVE
 	rf.totalVotes = 0
@@ -493,10 +489,10 @@ func (rf *Worker_Raft) HeartBeatChannel(args *raft_api.HeartBeadRequest) *raft_a
 	return &reply
 }
 
-func (rf *Worker_Raft) SendHeartBeatReply(server int32, request *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, bool) {
+func (rf *Worker_Raft) SendHeartBeatReply(client raft_api.RaftServiceClient, request *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	response, err := rf.peers[server].HeartBead(ctx, request)
+	response, err := client.HeartBead(ctx, request)
 	if err == nil {
 		return response, true
 	} else {
@@ -566,4 +562,24 @@ func (rf *Worker_Raft) drainOldTimer() {
 		DPrintf("Server %d: drain the old timer\n", rf.me)
 	default:
 	}
+}
+
+type NodeStatus struct {
+	role    raft_api.Role
+	healthy bool
+}
+
+func (rf *Worker_Raft) GetNodeStatus() *NodeStatus {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	nodeStatus := &NodeStatus{
+		role:    rf.state,
+		healthy: CheckLegalMaster(rf.clusterInfo),
+	}
+	return nodeStatus
+
+}
+
+func (rf *Worker_Raft) RoleNotify() <-chan raft_api.Role {
+	return rf.isMasterCh
 }
