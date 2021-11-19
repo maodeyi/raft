@@ -39,17 +39,17 @@ package mongo_stream
 //	//changeStreamDocument
 //	//object_id := bson.D{{"_id", "618b6476899dc7650a36a54c"}}
 //	//object_id := bson.Raw{byte[]("618b6476899dc7650a36a54c")}
-//	resumeToken := strings.Trim(tokenDoc.Lookup("_data").String(), "\"")
+//	resumeToken := strings.Trim(tokenDoc.Lookup("_data").String(), "\"")log
 //	log.Println(resumeToken)
 //	streamopts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-//	streamopts.SetResumeAfter(tokenDoc)                                                   //(bson.D{{"_data", resumeToken}})
+//	streamopts.SetResumeAfter(to/**/kenDoc)                                                   //(bson.D{{"_data", resumeToken}})
 //	episodesStream, err := opCollection.Watch(context.TODO(), mongo.Pipeline{matchStage}) //, streamopts)
 //	if err != nil {
 //		log.Println(err)
 //	}
 //	defer episodesStream.Close(context.TODO())
 //
-//	for episodesStream.Next(context.TODO()) {
+//	for episodesStream.Next(context.TåODO()) {
 //		var data bson.M
 //		if err := episodesStream.Decode(&data); err != nil {
 //			panic(err)
