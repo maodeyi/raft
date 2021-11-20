@@ -2,23 +2,26 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 
 	"github.com/maodeyi/raft/raft/util"
 	"github.com/sirupsen/logrus"
-	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
-	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
-	"google.golang.org/appengine/log"
+	"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
+	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"google.golang.org/grpc"
 )
 
 type Node struct {
-	NodeInfo      *raft_api.NodeInfo
-	Client        raft_api.RaftServiceClient
+	NodeInfo      *api.NodeInfo
+	Client        api.StaticFeatureDBWorkerServiceClient
 	Conn          *grpc.ClientConn
 	ClusterStatus bool
+}
+
+type NodesStatus struct {
+	clusterInfo map[string]*Node
+	nodesVisted map[string]bool
 }
 
 type Proxy struct {
@@ -49,7 +52,7 @@ func (s *Proxy) destoryWorkNode(node *Node) error {
 	return node.Conn.Close()
 }
 
-func (s *Proxy) initWorkNode(nodeInfo *raft_api.NodeInfo) (*Node, error) {
+func (s *Proxy) initWorkNode(nodeInfo *api.NodeInfo) (*Node, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
@@ -57,11 +60,11 @@ func (s *Proxy) initWorkNode(nodeInfo *raft_api.NodeInfo) (*Node, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node := &Node{
-		NodeInfo: &raft_api.NodeInfo{
+		NodeInfo: &api.NodeInfo{
 			Id:   "1",
 			Ip:   "127.0.0.1",
 			Port: "8080",
-			Role: raft_api.Role_SLAVE,
+			Role: api.Role_SLAVE,
 		},
 		ClusterStatus: true,
 	}
@@ -70,17 +73,19 @@ func (s *Proxy) initWorkNode(nodeInfo *raft_api.NodeInfo) (*Node, error) {
 		node.NodeInfo.LastStatus = false
 	} else {
 		node.NodeInfo.LastStatus = true
-		node.Client = raft_api.NewRaftServiceClient(conn)
+		node.Client = api.NewStaticFeatureDBWorkerServiceClient(conn)
 		node.Conn = conn
 	}
 	s.Ids = append(s.Ids, node.NodeInfo.Id)
 	return node, err
 }
 
-func (s *Proxy) getMaster() *Node {
+func (s *Proxy) getMaster() api.StaticFeatureDBWorkerServiceClient {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, v := range s.clusterInfo {
-		if v.NodeInfo.Role == raft_api.Role_MASTER {
-			return v
+		if v.NodeInfo.Role == api.Role_MASTER {
+			return v.Client
 		}
 	}
 	return nil
@@ -103,7 +108,7 @@ func (s *Proxy) Init() error {
 	return nil
 }
 
-func (s *Proxy) roundroubin() raft_api.RaftServiceClient {
+func (s *Proxy) roundroubin() api.StaticFeatureDBWorkerServiceClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	length := len(s.Ids)
@@ -112,11 +117,11 @@ func (s *Proxy) roundroubin() raft_api.RaftServiceClient {
 	return s.clusterInfo[s.Ids[index]].Client
 }
 
-func (s *Proxy) nodeIsEqual(src *raft_api.NodeInfo, des *raft_api.NodeInfo) bool {
+func (s *Proxy) nodeIsEqual(src *api.NodeInfo, des *api.NodeInfo) bool {
 	return src.Ip == des.Ip && src.Port == des.Port && src.Id == des.Id
 }
 
-func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
+func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -163,7 +168,7 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
 	}
 }
 
-func (s *Proxy) checkLegalMaster(clusterInfo []*raft_api.NodeInfo) bool {
+func (s *Proxy) checkLegalMaster(clusterInfo []*api.NodeInfo) bool {
 	number := len(clusterInfo)
 	var healthNumber int32
 	for _, v := range clusterInfo {
@@ -178,74 +183,167 @@ func (s *Proxy) checkLegalMaster(clusterInfo []*raft_api.NodeInfo) bool {
 	return false
 }
 
-func (s *Proxy) writeToMaster(ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, error) {
-	master := s.getMaster()
-	if master != nil {
-		workerResp, ok, err := s.wirteToNode(master, ctx, in)
-		if ok {
-			//TODO remove clusterinfo and return to client
-			//resp.SeqId = int32(workerResp.Role)
-			return workerResp, err
+func (s *Proxy) GetClusterInfo(ctx context.Context, in *api.GetClusterInfoRequest) (*api.GetClusterInfoResponse, error) {
+	return nil, nil
+}
+
+func (s *Proxy) PingNode(_ context.Context, request *api.PingNodeRequest) (*api.PingNodeResponse, error) {
+	return nil, nil
+}
+
+func (s *Proxy) tryMaster() api.StaticFeatureDBWorkerServiceClient {
+	node := s.getMaster()
+	if node == nil {
+		node = s.roundroubin()
+	}
+	return node
+}
+
+func (s *Proxy) getNodesStatus() (NodesStatus, string) {
+	s.mu.Lock()
+	nodes := NodesStatus{
+		clusterInfo: util.CloneClusterInfo(s.clusterInfo),
+		nodesVisted: make(map[string]bool),
+	}
+	s.mu.Unlock()
+
+	var id string
+
+	for k, _ := range nodes.clusterInfo {
+		nodes.nodesVisted[k] = false
+		if nodes.clusterInfo[k].NodeInfo.Role == api.Role_MASTER {
+			id = k
 		}
+	}
+	return nodes, id
+}
+
+func (s *Proxy) IndexNew(ctx context.Context, request *api.IndexNewRequest) (*api.IndexNewResponse, error) {
+	nodes, masterIndex := s.getNodesStatus()
+	if masterIndex != "" {
+		node, _ := nodes.clusterInfo[masterIndex]
+		workerResp, err := node.Client.IndexNew(ctx, request)
 		if workerResp != nil {
-			if master.NodeInfo.Id == s.getMaster().NodeInfo.Id {
-				return workerResp, err
+			ok, unhNodes := util.CheckLegalMaster(workerResp.ClusterInfo.NodeInfo)
+			if ok {
+				s.checkClusterInfo(workerResp.ClusterInfo.NodeInfo)
+				if workerResp.Role == api.Role_MASTER {
+					return workerResp, err
+				}
+			} else {
+				for _, v := range unhNodes {
+					nodes.nodesVisted[v] = true
+				}
+
 			}
 		}
-		return s.writeToMaster(ctx, in)
+
+		if err != nil {
+			s.logger.Errorf("Client IndexNew error %v", err)
+		}
+		nodes.nodesVisted[masterIndex] = true
 	} else {
-		return nil, errors.New("no master")
+
 	}
+
+	workerResp.ClusterInfo
+	return nil, util.ErrNotLeader
 }
 
-func (s *Proxy) wirteToNode(node *Node, ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, bool, error) {
-	workerResp, err := node.Client.Write(ctx, in)
-	if workerResp == nil {
-		//todo retry
-		return workerResp, false, err
+func (s *Proxy) IndexDel(ctx context.Context, request *api.IndexDelRequest) (*api.IndexDelResponse, error) {
+	master := s.getMaster()
+	if master != nil {
+		return master.Client.IndexDel(ctx, request)
 	}
-	if err != nil {
-		log.Errorf(ctx, "worker write error %v", err)
-	}
-
-	if !util.CheckLegalMaster(workerResp.ClusterInfo.NodeInfo) {
-		return workerResp, false, err
-	}
-
-	s.checkClusterInfo(workerResp.ClusterInfo.NodeInfo)
-
-	if workerResp.Role == raft_api.Role_MASTER {
-		return workerResp, true, err
-	}
-
-	return workerResp, false, err
+	return nil, util.ErrNotLeader
 }
 
-func (s *Proxy) Write(ctx context.Context, in *raft_proxy.WriteRequest) (*raft_proxy.WriteResponse, error) {
-	req := &raft_api.WriteRequest{}
-	resp := &raft_proxy.WriteResponse{}
-	var err error
-	wrokerResp, err := s.writeToMaster(ctx, req)
-	if wrokerResp == nil {
+func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*api.IndexListResponse, error) {
+	node := s.roundroubin()
+	return node.IndexList(ctx, request)
+}
+
+func (s *Proxy) IndexTrain(_ context.Context, request *api.IndexTrainRequest) (*api.IndexTrainResponse, error) {
+	return nil, nil
+}
+
+func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*api.IndexGetResponse, error) {
+	node := s.roundroubin()
+	return node.IndexGet(ctx, request)
+}
+
+func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*db.FeatureBatchAddResponse, error) {
+	resp := &proxy_api.FeatureBatchAddResponse{}
+	master := s.getMaster()
+	if master != nil {
+		workerResp, err := master.Client.FeatureBatchAdd(ctx, request)
+		if workerResp != nil {
+			resp.Results = workerResp.Results
+			resp.Ids = workerResp.Ids
+		}
 		return resp, err
 	}
-
-	//todo remove clustinfo in reponse
-	return resp, err
+	return nil, util.ErrNotLeader
 }
 
-func (s *Proxy) Read(ctx context.Context, in *raft_proxy.ReadRequest) (*raft_proxy.ReadResponse, error) {
-	workerClient := s.roundroubin()
-	req := &raft_api.ReadRequest{}
-	_, err := workerClient.Read(ctx, req)
-	if err != nil {
-		log.Errorf(ctx, "worker read error %v", err)
+func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatchDeleteRequest) (*db.FeatureBatchDeleteResponse, error) {
+	resp := &proxy_api.FeatureBatchDeleteResponse{}
+	master := s.getMaster()
+	if master != nil {
+		workerResp, err := master.Client.FeatureBatchDelete(ctx, request)
+		if workerResp != nil {
+			resp.Results = workerResp.Results
+		}
+		return resp, err
 	}
-	//todo clusterInfo to resp
-	resp := &raft_proxy.ReadResponse{}
-	return resp, nil
+	return nil, util.ErrNotLeader
 }
 
-func (s *Proxy) GetClusterInfo(ctx context.Context, in *raft_proxy.GetClusterInfoRequest) (*raft_proxy.GetClusterInfoResponse, error) {
+func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*db.FeatureBatchSearchResponse, error) {
+	resp := &proxy_api.FeatureBatchSearchResponse{}
+	node := s.roundroubin()
+	workerResp, err := node.FeatureBatchSearch(ctx, request)
+	if workerResp != nil {
+		resp.ColId = workerResp.ColId
+		resp.FeatureResults = workerResp.FeatureResults
+		resp.IsRefined = workerResp.IsRefined
+		resp.Results = workerResp.Results
+	}
+	return resp, err
+
+}
+
+func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*db.FeatureUpdateResponse, error) {
+	resp := &proxy_api.FeatureUpdateResponse{}
+	master := s.getMaster()
+	if master != nil {
+		workerResp, err := master.Client.FeatureUpdate(ctx, request)
+		if workerResp != nil {
+			//to do check master
+			return resp, err
+		}
+		return resp, err
+	}
+	return nil, util.ErrNotLeader
+}
+
+func (s *Proxy) FeatureBatchUpdate(ctx context.Context, request *db.FeatureBatchUpdateRequest) (*db.FeatureBatchUpdateResponse, error) {
+	resp := &proxy_api.FeatureBatchUpdateResponse{}
+	master := s.getMaster()
+	if master != nil {
+		workerResp, err := master.Client.FeatureBatchUpdate(ctx, request)
+		if workerResp != nil {
+			resp.Results = workerResp.Results
+		}
+		return resp, err
+	}
+	return nil, util.ErrNotLeader
+}
+
+func (s *Proxy) RequestVote(ctx context.Context, in *api.RequestVoteRequest) (*api.RequestVoteResponse, error) {
+	return nil, nil
+}
+
+func (s *Proxy) HeartBead(ctx context.Context, in *api.HeartBeadRequest) (*api.HeartBeadResponse, error) {
 	return nil, nil
 }

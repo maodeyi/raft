@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"net"
 	"net/http"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/maodeyi/raft/raft/proxy"
 
-	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
+	proxy_api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
 )
 
 func main() {
@@ -30,13 +31,13 @@ func main() {
 	if err != nil {
 		grpclog.Fatalf("proxy Init err:%v\n", err)
 	}
-	raft_proxy.RegisterRaftProxyServer(grpcServer, proxy)
 
+	api.RegisterStaticFeatureDBWorkerServiceServer(grpcServer, proxy)
 	// gw server
 	ctx := context.Background()
 	dopts := []grpc.DialOption{}
 	gwmux := runtime.NewServeMux()
-	if err = raft_proxy.RegisterRaftProxyHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
+	if err = proxy_api.RegisterStaticFeatureDBProxyHandlerFromEndpoint(ctx, gwmux, endpoint, dopts); err != nil {
 		grpclog.Fatalf("Failed to register gw server: %v\n", err)
 	}
 

@@ -7,7 +7,6 @@ import (
 
 	"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
-	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 )
 
 type WorkerWarpper struct {
@@ -40,63 +39,64 @@ func (s *WorkerWarpper) Run() {
 	s.b.Run()
 }
 
-func (s *WorkerWarpper) RequestVote(ctx context.Context, in *raft_api.RequestVoteRequest) (*raft_api.RequestVoteResponse, error) {
+func (s *WorkerWarpper) RequestVote(ctx context.Context, in *api.RequestVoteRequest) (*api.RequestVoteResponse, error) {
 	return s.workerRaft.RequestVoteChannel(in), nil
 }
 
-func (s *WorkerWarpper) HeartBead(ctx context.Context, in *raft_api.HeartBeadRequest) (*raft_api.HeartBeadResponse, error) {
+func (s *WorkerWarpper) HeartBead(ctx context.Context, in *api.HeartBeadRequest) (*api.HeartBeadResponse, error) {
 	return s.workerRaft.HeartBeatChannel(in), nil
 }
 
-func (s *WorkerWarpper) Write(ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, error) {
-	resp := &raft_api.WriteResponse{
-		ClusterInfo: &raft_api.ClusterInfo{},
-	}
+//
+//func (s *WorkerWarpper) Write(ctx context.Context, in *api.WriteRequest) (*api.WriteResponse, error) {
+//	resp := &api.WriteResponse{
+//		ClusterInfo: &api.ClusterInfo{},
+//	}
+//	s.workerRaft.mu.Lock()
+//	defer s.workerRaft.mu.Unlock()
+//
+//	if s.workerRaft.state != api.Role_MASTER {
+//		return nil, errors.New("not master")
+//	}
+//	for _, v := range s.workerRaft.clusterInfo {
+//		nodeInfo := &api.NodeInfo{
+//			Id:         v.Id,
+//			Ip:         v.Ip,
+//			Port:       v.Port,
+//			LastStatus: v.LastStatus,
+//			Role:       v.Role,
+//		}
+//		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
+//	}
+//
+//	resp.Role = s.workerRaft.state
+//
+//	//todo mongo do not need lock
+//	if !s.workerRaft.syncdone {
+//		return resp, errors.New("sync oplog")
+//	}
+//	err := s.b.MongoClient.InsertOpLog()
+//	if err != nil {
+//		return resp, err
+//	}
+//	s.workerRaft.seq_id++
+//
+//	return resp, nil
+//}
+//
+//func (s *WorkerWarpper) Read(ctx context.Context, in *api.ReadRequest) (*api.ReadResponse, error) {
+//	resp := &api.ReadResponse{ClusterInfo: &api.ClusterInfo{}}
+//	return resp, nil
+//}
+
+func (s *WorkerWarpper) GetClusterInfo(ctx context.Context, in *api.GetClusterInfoRequest) (*api.GetClusterInfoResponse, error) {
+	resp := &api.GetClusterInfoResponse{}
 	s.workerRaft.mu.Lock()
-	defer s.workerRaft.mu.Unlock()
-
-	if s.workerRaft.state != raft_api.Role_MASTER {
-		return nil, errors.New("not master")
-	}
-	for _, v := range s.workerRaft.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
-			Id:         v.Id,
-			Ip:         v.Ip,
-			Port:       v.Port,
-			LastStatus: v.LastStatus,
-			Role:       v.Role,
-		}
-		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
-	}
-
-	resp.Role = s.workerRaft.state
-
-	//todo mongo do not need lock
-	if !s.workerRaft.syncdone {
-		return resp, errors.New("sync oplog")
-	}
-	err := s.b.MongoClient.InsertOpLog()
-	if err != nil {
-		return resp, err
-	}
-	s.workerRaft.seq_id++
-
-	return resp, nil
-}
-
-func (s *WorkerWarpper) Read(ctx context.Context, in *raft_api.ReadRequest) (*raft_api.ReadResponse, error) {
-	resp := &raft_api.ReadResponse{ClusterInfo: &raft_api.ClusterInfo{}}
-	return resp, nil
-}
-
-func (s *WorkerWarpper) GetClusterInfo(ctx context.Context, in *raft_api.GetClusterInfoRequest) (*raft_api.GetClusterInfoResponse, error) {
-	resp := &raft_api.GetClusterInfoResponse{}
-	s.workerRaft.mu.Lock()
-	if s.workerRaft.state != raft_api.Role_MASTER {
+	if s.workerRaft.state != api.Role_MASTER {
 		return resp, errors.New("no master")
 	}
 	for _, v := range s.workerRaft.clusterInfo {
-		nodeInfo := &raft_api.NodeInfo{
+		nodeInfo := &api.NodeInfo{
 			Id:         v.Id,
 			Ip:         v.Ip,
 			Port:       v.Port,

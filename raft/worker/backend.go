@@ -11,7 +11,6 @@ import (
 	"gitlab.bj.sensetime.com/mercury/protohub/api/commonapis"
 	sfd_db "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
-	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -23,15 +22,21 @@ import (
 	"time"
 )
 
+type Worker interface {
+	subscribeOpLogs()
+	SyncOplogs()
+}
+
 var snapshotInterval = 5 * time.Minute
 
 type backend struct {
+	Worker
 	logger  *logrus.Entry
 	mu      sync.RWMutex            // lock for indexes
 	indexes map[string]*memoryIndex // index id -> memory index
 
 	// cluster fields
-	raft    *WorkerRaft      // raft
+	raft    Raft             // raft
 	n       int              // worker number in cluster // TODO yore: 这个应该也只跟 sniffer 一起用, 以及通过接口热更新.
 	sniffer *sniffer.Sniffer // TODO yore: sniffer and raft 融合?
 
@@ -62,7 +67,7 @@ func newBackend() (*backend, error) {
 	return b, nil
 }
 
-func (b *backend) Init(raft *WorkerRaft) {
+func (b *backend) Init(raft Raft) {
 	b.raft = raft
 }
 
@@ -96,16 +101,15 @@ func (b *backend) subscribeOpLogs() {
 	go func() {
 		for true {
 			select {
-			//when raft change into follower from master receive from subscribeOplogsCh
-			case isMaster := <-b.raft.isMasterCh:
-				if isMaster == raft_api.Role_MASTER {
+			case isMaster := <-b.raft.RoleNotify():
+				if isMaster == api.Role_MASTER {
 					b.logger.Infof("turn to master stop subcribe and sync log")
-					break
+					return
 				}
 			default:
 			}
-			time.Sleep(300 * time.Millisecond)
-			b.SyncOplos()
+			time.Sleep(200 * time.Millisecond)
+			_ = b.RepalyOplogs()
 		}
 	}()
 }
@@ -113,11 +117,11 @@ func (b *backend) subscribeOpLogs() {
 func (b *backend) Snapshot() {
 	for true {
 		select {
-		case isMaster := <-b.raft.isMasterCh:
-			if isMaster == raft_api.Role_MASTER {
+		case isMaster := <-b.raft.RoleNotify():
+			if isMaster == api.Role_MASTER {
 				b.logger.Infof("turn to master begin snapshot")
 				b.snapshotTicker = time.NewTicker(snapshotInterval)
-			} else if isMaster == raft_api.Role_SLAVE {
+			} else if isMaster == api.Role_SLAVE {
 				b.logger.Infof("turn to slave stop snapshot")
 				if b.snapshotTicker != nil {
 					b.snapshotTicker.Stop()
@@ -129,12 +133,12 @@ func (b *backend) Snapshot() {
 	}
 }
 
-func (b *backend) handleRoleChange(old, new raft_api.Role) {
+func (b *backend) handleRoleChange(old, new api.Role) {
 	if old == new {
 		return
 	}
 
-	if new == raft_api.Role_SLAVE {
+	if new == api.Role_SLAVE {
 		// 1. TODO yore: start oplog subscriber
 
 		// 2. stop snapshot
@@ -146,7 +150,7 @@ func (b *backend) handleRoleChange(old, new raft_api.Role) {
 		// 3. TODO yore: stop index trainer
 
 	}
-	if new == raft_api.Role_MASTER {
+	if new == api.Role_MASTER {
 		// 1. TODO yore: stop oplog subscriber
 
 		// 2. start snapshot
@@ -408,14 +412,14 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.
 	}
 
 	results := make([]*commonapis.Result, len(items))
-	resp := make([]*sfd_db.FeatureBatchSearchResponse_OneFeatureResult, len(items))
+	resp := make([]*sfd_db.OneFeatureResult, len(items))
 	features := make([][]float32, 0, len(items))
 	mapping := make(map[int]int, len(items)) // features idx -> results idx
 	for i, v := range items {
 		f := parseFeature(v.GetBlob())
 		if f == nil {
 			results[i] = &commonapis.Result{Code: 3, Error: "invalid feature"}
-			resp[i] = &sfd_db.FeatureBatchSearchResponse_OneFeatureResult{}
+			resp[i] = &sfd_db.OneFeatureResult{}
 			continue
 		}
 		results[i] = &commonapis.Result{}
@@ -425,15 +429,15 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.
 
 	for i, v := range features {
 		res := index.search(v, int(req.GetTopK()))
-		ret := make([]*sfd_db.FeatureBatchSearchResponse_SimilarResult, 0, len(res))
+		ret := make([]*sfd_db.SimilarResult, 0, len(res))
 		for _, v := range res {
-			ret = append(ret, &sfd_db.FeatureBatchSearchResponse_SimilarResult{
+			ret = append(ret, &sfd_db.SimilarResult{
 				Item:    &sfd_db.FeatureItem{Id: genFeatureID(indexID, v.seq)},
 				Score:   float32(v.score),
 				IndexId: indexID,
 			})
 		}
-		resp[mapping[i]] = &sfd_db.FeatureBatchSearchResponse_OneFeatureResult{Results: ret}
+		resp[mapping[i]] = &sfd_db.OneFeatureResult{Results: ret}
 	}
 
 	return &sfd_db.FeatureBatchSearchResponse{
@@ -444,53 +448,69 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.
 	}, nil
 }
 
-func (b *backend) SyncOplos() {
-	for true {
-		op, err := b.MongoClient.GetOplog(b.gen.GetSeq())
-		if op != nil {
-			if op.Operation == "add" {
-				req := &sfd_db.FeatureBatchAddRequest{
-					ColId: op.ColId,
-				}
-				blob, _ := base64.StdEncoding.DecodeString(op.Feature)
-				feature := &commonapis.ObjectFeature{
-					Type:    "",
-					Version: 0,
-					Blob:    blob,
-				}
-				featureItem := &sfd_db.FeatureItem{
-					Id:        "",
-					SeqId:     op.SeqId,
-					Feature:   feature,
-					ImageId:   "",
-					ExtraInfo: "",
-					MetaData:  nil,
-					Key:       "",
-				}
-				req.Items = append(req.Items, featureItem)
-
-				_, err := b.featureBatchAdd(req)
-				if err != nil {
-					b.logger.Errorf("SyncOplos featureBatchAdd error %v", err)
-					continue
-				}
-				b.gen.NextSeq()
-			} else if op.Operation == "del" {
-				req := &sfd_db.FeatureBatchDeleteRequest{
-					ColId: op.ColId,
-				}
-				req.Ids = append(req.Ids, op.FeatureId)
-				_, err := b.featureBatchDel(req)
-				if err != nil {
-					b.logger.Errorf("SyncOplos featureBatchDel error %v", err)
-					continue
-				}
+func (b *backend) RepalyOplogs() error {
+	op, err := b.MongoClient.GetOplog(b.gen.GetSeq())
+	if op != nil {
+		if op.Operation == "add" {
+			req := &sfd_db.FeatureBatchAddRequest{
+				ColId: op.ColId,
 			}
-		} else if err != nil {
-			if err == mongo.ErrNoDocuments {
+			blob, _ := base64.StdEncoding.DecodeString(op.Feature)
+			feature := &commonapis.ObjectFeature{
+				Type:    "",
+				Version: 0,
+				Blob:    blob,
+			}
+			featureItem := &sfd_db.FeatureItem{
+				Id:        "",
+				SeqId:     op.SeqId,
+				Feature:   feature,
+				ImageId:   "",
+				ExtraInfo: "",
+				MetaData:  nil,
+				Key:       "",
+			}
+			req.Items = append(req.Items, featureItem)
+
+			_, err := b.featureBatchAdd(req)
+			if err != nil {
+				b.logger.Errorf("SyncOplos featureBatchAdd error %v", err)
+				return util.ErrOplogNotEnd
+			}
+			b.gen.NextSeq()
+		} else if op.Operation == "del" {
+			req := &sfd_db.FeatureBatchDeleteRequest{
+				ColId: op.ColId,
+			}
+			req.Ids = append(req.Ids, op.FeatureId)
+			_, err := b.featureBatchDel(req)
+			if err != nil {
+				b.logger.Errorf("SyncOplos featureBatchDel error %v", err)
+			}
+			return util.ErrOplogNotEnd
+		}
+	} else if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return util.ErrOplogEof
+		}
+		b.logger.Errorf("syncOplogs err %v", err)
+		return util.ErrOplogNotEnd
+	}
+	return err
+}
+
+func (b *backend) SyncOplogs() {
+	for true {
+		select {
+		case syncDone := <-b.raft.SyncDoneNotify():
+			if syncDone {
+				b.logger.Infof("trun to slave break sync")
 				return
 			}
-			b.logger.Errorf("syncOplogs err %v", err)
+		default:
+		}
+		err := b.RepalyOplogs()
+		if err == util.ErrOplogEof {
 			return
 		}
 	}
