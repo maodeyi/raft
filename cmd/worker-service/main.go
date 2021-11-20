@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 
 	"crypto/tls"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
@@ -32,7 +33,7 @@ func main() {
 		grpclog.Fatalf("worker.Init err:%v\n", err)
 	}
 	worker.Run()
-	raft_api.RegisterRaftServiceServer(grpcServer, worker)
+	api.RegisterStaticFeatureDBWorkerServiceServer(grpcServer, worker)
 
 	// gw server
 	ctx := context.Background()

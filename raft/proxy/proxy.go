@@ -2,12 +2,16 @@ package proxy
 
 import (
 	"context"
+	"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
+
+	//"google.golang.org/grpc/codes"
+	//"google.golang.org/grpc/status"
 	"sync"
 	"time"
 
 	"github.com/maodeyi/raft/raft/util"
 	"github.com/sirupsen/logrus"
-	"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
+	//"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"google.golang.org/grpc"
 )
@@ -121,14 +125,18 @@ func (s *Proxy) nodeIsEqual(src *api.NodeInfo, des *api.NodeInfo) bool {
 	return src.Ip == des.Ip && src.Port == des.Port && src.Id == des.Id
 }
 
-func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) {
+func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var id string
 	//del
 	length := len(clusterInfo)
 	for i, v := range s.Ids {
 		for index, node := range clusterInfo {
+			if node.Role == api.Role_MASTER {
+				id = node.Id
+			}
 			if v == node.Id {
 				break
 			}
@@ -140,6 +148,9 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) {
 	}
 
 	for _, v := range clusterInfo {
+		if v.Role == api.Role_MASTER {
+			id = v.Id
+		}
 		//add
 		node, ok := s.clusterInfo[v.Id]
 		if !ok {
@@ -166,6 +177,7 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) {
 			s.clusterInfo[v.Id].NodeInfo.Role = v.Role
 		}
 	}
+	return id
 }
 
 func (s *Proxy) checkLegalMaster(clusterInfo []*api.NodeInfo) bool {
@@ -218,44 +230,102 @@ func (s *Proxy) getNodesStatus() (NodesStatus, string) {
 	return nodes, id
 }
 
-func (s *Proxy) IndexNew(ctx context.Context, request *api.IndexNewRequest) (*api.IndexNewResponse, error) {
+func (s *Proxy) cloneNodes(nodes NodesStatus) NodesStatus {
+	nodesStaus := NodesStatus{
+		clusterInfo: make(map[string]*Node),
+		nodesVisted: make(map[string]bool),
+	}
+
+	for k, v := range nodes.clusterInfo {
+		nodesStaus.clusterInfo[k] = v
+		nodesStaus.nodesVisted[k] = nodes.nodesVisted[k]
+	}
+	return nodesStaus
+}
+
+func (s *Proxy) nextUnvisted(nodes NodesStatus) string {
+	for k, v := range nodes.nodesVisted {
+		if v == false {
+			return k
+		}
+	}
+	return ""
+}
+
+func (s *Proxy) callMethod(ctx context.Context, client api.StaticFeatureDBWorkerServiceClient, req interface{}) (interface{}, *api.ClusterInfo, error) {
+	var resp interface{}
+	var clusterInfo *api.ClusterInfo
+	var err error
+	switch v := req.(type) {
+	case *api.IndexNewRequest:
+		resp, err = client.IndexNew(ctx, v)
+		clusterInfo = resp.(*api.IndexNewResponse).ClusterInfo
+	case *api.IndexDelRequest:
+		resp, err = client.IndexDel(ctx, v)
+		clusterInfo = resp.(*api.IndexDelResponse).ClusterInfo
+	//case *api.IndexListRequest:
+	//	resp, err = client.IndexList(ctx, v)
+	//case *api.IndexGetRequest:
+	//	resp, err = client.IndexGet(ctx, v)
+	case *db.FeatureBatchAddRequest:
+		resp, err = client.FeatureBatchAdd(ctx, v)
+		clusterInfo = resp.(*api.FeatureBatchAddResponse).ClusterInfo
+	case *db.FeatureBatchDeleteRequest:
+		resp, err = client.FeatureBatchDelete(ctx, v)
+		clusterInfo = resp.(*api.FeatureBatchDeleteResponse).ClusterInfo
+		//case *db.FeatureBatchSearchRequest:
+		//	resp, err = client.FeatureSearch(ctx, v)
+	}
+	return resp, clusterInfo, err
+}
+
+func (s *Proxy) tryNode(ctx context.Context, req interface{}) (interface{}, error) {
 	nodes, masterIndex := s.getNodesStatus()
+MASTER:
 	if masterIndex != "" {
-		node, _ := nodes.clusterInfo[masterIndex]
-		workerResp, err := node.Client.IndexNew(ctx, request)
-		if workerResp != nil {
-			ok, unhNodes := util.CheckLegalMaster(workerResp.ClusterInfo.NodeInfo)
+		node, ok := nodes.clusterInfo[masterIndex]
+		if !ok {
+			return nil, util.ErrNotLeader
+		}
+		resp, clusterInfo, err := s.callMethod(ctx, node.Client, req)
+
+		if err != nil {
+			s.logger.Errorf("index %s Client IndexNew error %v", masterIndex, err)
+		}
+		if clusterInfo != nil {
+			ok, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
 			if ok {
-				s.checkClusterInfo(workerResp.ClusterInfo.NodeInfo)
-				if workerResp.Role == api.Role_MASTER {
-					return workerResp, err
+				s.checkClusterInfo(clusterInfo.NodeInfo)
+				if resp.Role == api.Role_MASTER {
+					return resp, err
+				} else {
+					nodes.nodesVisted[masterIndex] = true
+					masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
+					goto MASTER
 				}
 			} else {
 				for _, v := range unhNodes {
 					nodes.nodesVisted[v] = true
 				}
-
+				masterIndex = s.nextUnvisted(nodes)
+				goto MASTER
 			}
+		} else {
+			nodes.nodesVisted[masterIndex] = true
+			masterIndex = s.nextUnvisted(nodes)
+			goto MASTER
 		}
-
-		if err != nil {
-			s.logger.Errorf("Client IndexNew error %v", err)
-		}
-		nodes.nodesVisted[masterIndex] = true
 	} else {
-
+		return nil, util.ErrNoLeader
 	}
+}
 
-	workerResp.ClusterInfo
-	return nil, util.ErrNotLeader
+func (s *Proxy) IndexNew(ctx context.Context, request *api.IndexNewRequest) (*api.IndexNewResponse, error) {
+	return s.tryNode(ctx, request)
 }
 
 func (s *Proxy) IndexDel(ctx context.Context, request *api.IndexDelRequest) (*api.IndexDelResponse, error) {
-	master := s.getMaster()
-	if master != nil {
-		return master.Client.IndexDel(ctx, request)
-	}
-	return nil, util.ErrNotLeader
+	return s.tryNode(ctx, request)
 }
 
 func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*api.IndexListResponse, error) {
@@ -272,48 +342,20 @@ func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*ap
 	return node.IndexGet(ctx, request)
 }
 
-func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*db.FeatureBatchAddResponse, error) {
-	resp := &proxy_api.FeatureBatchAddResponse{}
-	master := s.getMaster()
-	if master != nil {
-		workerResp, err := master.Client.FeatureBatchAdd(ctx, request)
-		if workerResp != nil {
-			resp.Results = workerResp.Results
-			resp.Ids = workerResp.Ids
-		}
-		return resp, err
-	}
-	return nil, util.ErrNotLeader
+func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
+	return s.tryNode(ctx, request)
 }
 
-func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatchDeleteRequest) (*db.FeatureBatchDeleteResponse, error) {
-	resp := &proxy_api.FeatureBatchDeleteResponse{}
-	master := s.getMaster()
-	if master != nil {
-		workerResp, err := master.Client.FeatureBatchDelete(ctx, request)
-		if workerResp != nil {
-			resp.Results = workerResp.Results
-		}
-		return resp, err
-	}
-	return nil, util.ErrNotLeader
+func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatchDeleteRequest) (*api.FeatureBatchDeleteResponse, error) {
+	return s.tryNode(ctx, request)
 }
 
-func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*db.FeatureBatchSearchResponse, error) {
-	resp := &proxy_api.FeatureBatchSearchResponse{}
+func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
 	node := s.roundroubin()
-	workerResp, err := node.FeatureBatchSearch(ctx, request)
-	if workerResp != nil {
-		resp.ColId = workerResp.ColId
-		resp.FeatureResults = workerResp.FeatureResults
-		resp.IsRefined = workerResp.IsRefined
-		resp.Results = workerResp.Results
-	}
-	return resp, err
-
+	return node.FeatureBatchSearch(ctx, request)
 }
 
-func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*db.FeatureUpdateResponse, error) {
+func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*api.FeatureUpdateResponse, error) {
 	resp := &proxy_api.FeatureUpdateResponse{}
 	master := s.getMaster()
 	if master != nil {
@@ -327,7 +369,7 @@ func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequ
 	return nil, util.ErrNotLeader
 }
 
-func (s *Proxy) FeatureBatchUpdate(ctx context.Context, request *db.FeatureBatchUpdateRequest) (*db.FeatureBatchUpdateResponse, error) {
+func (s *Proxy) FeatureBatchUpdate(ctx context.Context, request *db.FeatureBatchUpdateRequest) (*api.FeatureBatchUpdateResponse, error) {
 	resp := &proxy_api.FeatureBatchUpdateResponse{}
 	master := s.getMaster()
 	if master != nil {

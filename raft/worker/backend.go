@@ -312,7 +312,7 @@ func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, err
 	}
 }
 
-func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*sfd_db.FeatureBatchAddResponse, error) {
+func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
 	if !b.isMaster() {
 		return nil, util.ErrNotLeader
 	}
@@ -352,7 +352,7 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*sfd_db.F
 	// 3. save to memory
 	index.add(features)
 
-	return &sfd_db.FeatureBatchAddResponse{
+	return &api.FeatureBatchAddResponse{
 		Results: results,
 		Ids:     ids,
 	}, nil

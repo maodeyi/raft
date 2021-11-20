@@ -158,42 +158,42 @@ func (s *WorkerWarpper) IndexGet(_ context.Context, request *api.IndexGetRequest
 	return resp.(*api.IndexGetResponse), nil
 }
 
-func (s *WorkerWarpper) FeatureBatchAdd(_ context.Context, request *db.FeatureBatchAddRequest) (*db.FeatureBatchAddResponse, error) {
+func (s *WorkerWarpper) FeatureBatchAdd(_ context.Context, request *db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
 	resp, err := s.b.sendRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	return resp.(*db.FeatureBatchAddResponse), nil
+	return resp.(*api.FeatureBatchAddResponse), nil
 }
 
-func (s *WorkerWarpper) FeatureBatchDelete(_ context.Context, request *db.FeatureBatchDeleteRequest) (*db.FeatureBatchDeleteResponse, error) {
+func (s *WorkerWarpper) FeatureBatchDelete(_ context.Context, request *db.FeatureBatchDeleteRequest) (*api.FeatureBatchDeleteResponse, error) {
 	resp, err := s.b.sendRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	return resp.(*db.FeatureBatchDeleteResponse), nil
+	return resp.(*api.FeatureBatchDeleteResponse), nil
 }
 
-func (s *WorkerWarpper) FeatureBatchSearch(_ context.Context, request *db.FeatureBatchSearchRequest) (*db.FeatureBatchSearchResponse, error) {
+func (s *WorkerWarpper) FeatureBatchSearch(_ context.Context, request *db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
 	resp, err := s.b.sendRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	return resp.(*db.FeatureBatchSearchResponse), nil
+	return resp.(*api.FeatureBatchSearchResponse), nil
 }
 
-func (s *WorkerWarpper) FeatureUpdate(_ context.Context, request *db.FeatureUpdateRequest) (*db.FeatureUpdateResponse, error) {
+func (s *WorkerWarpper) FeatureUpdate(_ context.Context, request *db.FeatureUpdateRequest) (*api.FeatureUpdateResponse, error) {
 	resp, err := s.b.sendRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	return resp.(*db.FeatureUpdateResponse), nil
+	return resp.(*api.FeatureUpdateResponse), nil
 }
 
-func (s *WorkerWarpper) FeatureBatchUpdate(_ context.Context, request *db.FeatureBatchUpdateRequest) (*db.FeatureBatchUpdateResponse, error) {
+func (s *WorkerWarpper) FeatureBatchUpdate(_ context.Context, request *db.FeatureBatchUpdateRequest) (*api.FeatureBatchUpdateResponse, error) {
 	resp, err := s.b.sendRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	return resp.(*db.FeatureBatchUpdateResponse), nil
+	return resp.(*api.FeatureBatchUpdateResponse), nil
 }
