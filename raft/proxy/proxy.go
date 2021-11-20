@@ -296,7 +296,7 @@ MASTER:
 			ok, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
 			if ok {
 				s.checkClusterInfo(clusterInfo.NodeInfo)
-				if resp.Role == api.Role_MASTER {
+				if clusterInfo.Role == api.Role_MASTER {
 					return resp, err
 				} else {
 					nodes.nodesVisted[masterIndex] = true
@@ -321,11 +321,13 @@ MASTER:
 }
 
 func (s *Proxy) IndexNew(ctx context.Context, request *api.IndexNewRequest) (*api.IndexNewResponse, error) {
-	return s.tryNode(ctx, request)
+	resp, err := s.tryNode(ctx, request)
+	return resp.(*api.IndexNewResponse), err
 }
 
 func (s *Proxy) IndexDel(ctx context.Context, request *api.IndexDelRequest) (*api.IndexDelResponse, error) {
-	return s.tryNode(ctx, request)
+	resp, err := s.tryNode(ctx, request)
+	return resp.(*api.IndexDelResponse), err
 }
 
 func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*api.IndexListResponse, error) {
@@ -343,11 +345,13 @@ func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*ap
 }
 
 func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
-	return s.tryNode(ctx, request)
+	resp, err := s.tryNode(ctx, request)
+	return resp.(*api.FeatureBatchAddResponse), err
 }
 
 func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatchDeleteRequest) (*api.FeatureBatchDeleteResponse, error) {
-	return s.tryNode(ctx, request)
+	resp, err := s.tryNode(ctx, request)
+	return resp.(*api.FeatureBatchDeleteResponse), err
 }
 
 func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
@@ -356,30 +360,15 @@ func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatch
 }
 
 func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*api.FeatureUpdateResponse, error) {
-	resp := &proxy_api.FeatureUpdateResponse{}
-	master := s.getMaster()
-	if master != nil {
-		workerResp, err := master.Client.FeatureUpdate(ctx, request)
-		if workerResp != nil {
-			//to do check master
-			return resp, err
-		}
-		return resp, err
-	}
-	return nil, util.ErrNotLeader
+	//resp, err := s.tryNode(ctx, request)
+	//return resp.(*api.FeatureUpdateResponse), err
+	return nil, nil
 }
 
 func (s *Proxy) FeatureBatchUpdate(ctx context.Context, request *db.FeatureBatchUpdateRequest) (*api.FeatureBatchUpdateResponse, error) {
-	resp := &proxy_api.FeatureBatchUpdateResponse{}
-	master := s.getMaster()
-	if master != nil {
-		workerResp, err := master.Client.FeatureBatchUpdate(ctx, request)
-		if workerResp != nil {
-			resp.Results = workerResp.Results
-		}
-		return resp, err
-	}
-	return nil, util.ErrNotLeader
+	//resp, err := s.tryNode(ctx, request)
+	//return resp.(*api.FeatureBatchUpdateResponse), err
+	return nil, nil
 }
 
 func (s *Proxy) RequestVote(ctx context.Context, in *api.RequestVoteRequest) (*api.RequestVoteResponse, error) {
