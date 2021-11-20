@@ -1,4 +1,4 @@
-package raft
+package db
 
 import (
 	"context"
@@ -48,22 +48,34 @@ func (m *MongoClient) Close() {
 
 type OP struct {
 	Id        primitive.ObjectID  `json:"id" bson:"_id,omitempty"`
+	ColId     string              `json:"colid"`
 	Operation string              `json:"operation"`
 	TimeStamp primitive.Timestamp `json:"timestamp"`
+	Feature   string              `json:"feature"`
+	FeatureId string              `json:"featureid"`
+	SeqId     int64               `json:"seqid"`
 }
 
-func (m *MongoClient) InsertOpLog() error {
+func (m *MongoClient) InsertOpLog(colId, action, feature, featureId string, seqId int64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	_, err := m.collection_op.InsertOne(ctx, bson.D{{"operation", "add"}, {"timestamp", primitive.Timestamp{T: uint32(time.Now().Unix())}}})
+	op := &OP{
+		ColId:     colId,
+		Operation: action,
+		TimeStamp: primitive.Timestamp{T: uint32(time.Now().Unix())},
+		Feature:   feature,
+		FeatureId: featureId,
+		SeqId:     seqId,
+	}
+	_, err := m.collection_op.InsertOne(ctx, op)
 	return err
 }
 
-func (m *MongoClient) GetOplog() (*OP, error) {
+func (m *MongoClient) GetOplog(begin int64) (*OP, error) {
 	result := OP{}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	err := m.collection_op.FindOne(ctx, bson.M{"timestamp": bson.M{"$gt": primitive.Timestamp{T: uint32(time.Now().Unix())}}}).Decode(&result)
+	err := m.collection_op.FindOne(ctx, bson.M{"seqid": bson.M{"$gt": begin}}).Decode(&result)
 	return &result, err
 }
 

@@ -1,20 +1,24 @@
-package raft
+package proxy
 
 import (
 	"context"
-	"google.golang.org/appengine/log"
-	"google.golang.org/grpc"
+	"errors"
 	"sync"
 	"time"
 
+	"github.com/maodeyi/raft/raft/util"
+	"github.com/sirupsen/logrus"
 	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
+	"google.golang.org/appengine/log"
+	"google.golang.org/grpc"
 )
 
 type Node struct {
-	NodeInfo *raft_api.NodeInfo
-	Client   raft_api.RaftServiceClient
-	Conn     *grpc.ClientConn
+	NodeInfo      *raft_api.NodeInfo
+	Client        raft_api.RaftServiceClient
+	Conn          *grpc.ClientConn
+	ClusterStatus bool
 }
 
 type Proxy struct {
@@ -22,10 +26,12 @@ type Proxy struct {
 	rrIndex     int32
 	clusterInfo map[string]*Node
 	Ids         []string
+	logger      *logrus.Entry
 }
 
 func NewProxy() *Proxy {
 	rf := &Proxy{
+		logger:  logrus.StandardLogger().WithField("component", "Proxy"),
 		rrIndex: -1,
 	}
 	return rf
@@ -57,6 +63,7 @@ func (s *Proxy) initWorkNode(nodeInfo *raft_api.NodeInfo) (*Node, error) {
 			Port: "8080",
 			Role: raft_api.Role_SLAVE,
 		},
+		ClusterStatus: true,
 	}
 
 	if err != nil {
@@ -88,7 +95,7 @@ func (s *Proxy) Init() error {
 	for _, v := range s.clusterInfo {
 		workerNode, err := s.initWorkNode(v.NodeInfo)
 		if err != nil {
-			DPrintf("proxy inti worker peer error %v", err)
+			s.logger.Errorf("proxy inti worker peer error %v", err)
 		}
 
 		s.clusterInfo[v.NodeInfo.Id] = workerNode
@@ -113,10 +120,6 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !CheckLegalMaster(clusterInfo) {
-		return
-	}
-
 	//del
 	length := len(clusterInfo)
 	for i, v := range s.Ids {
@@ -137,7 +140,7 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
 		if !ok {
 			node, err := s.initWorkNode(v)
 			if err != nil {
-				DPrintf("initWorkNode error %v", err)
+				s.logger.Errorf("initWorkNode error %v", err)
 			}
 			s.clusterInfo[v.Id] = node
 			continue
@@ -147,11 +150,11 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*raft_api.NodeInfo) {
 		if !s.nodeIsEqual(node.NodeInfo, v) {
 			err := s.destoryWorkNode(s.clusterInfo[v.Id])
 			if err != nil {
-				DPrintf("destoryWorkNode error %v", err)
+				s.logger.Errorf("destoryWorkNode error %v", err)
 			}
 			node, err := s.initWorkNode(v)
 			if err != nil {
-				DPrintf("initWorkNode error %v", err)
+				s.logger.Errorf("initWorkNode error %v", err)
 			}
 			s.clusterInfo[v.Id] = node
 		} else if s.clusterInfo[v.Id].NodeInfo.Role != v.Role {
@@ -175,54 +178,70 @@ func (s *Proxy) checkLegalMaster(clusterInfo []*raft_api.NodeInfo) bool {
 	return false
 }
 
+func (s *Proxy) writeToMaster(ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, error) {
+	master := s.getMaster()
+	if master != nil {
+		workerResp, ok, err := s.wirteToNode(master, ctx, in)
+		if ok {
+			//TODO remove clusterinfo and return to client
+			//resp.SeqId = int32(workerResp.Role)
+			return workerResp, err
+		}
+		if workerResp != nil {
+			if master.NodeInfo.Id == s.getMaster().NodeInfo.Id {
+				return workerResp, err
+			}
+		}
+		return s.writeToMaster(ctx, in)
+	} else {
+		return nil, errors.New("no master")
+	}
+}
+
 func (s *Proxy) wirteToNode(node *Node, ctx context.Context, in *raft_api.WriteRequest) (*raft_api.WriteResponse, bool, error) {
 	workerResp, err := node.Client.Write(ctx, in)
-	if workerResp == nil || workerResp.Role != raft_api.Role_MASTER {
+	if workerResp == nil {
+		//todo retry
 		return workerResp, false, err
 	}
 	if err != nil {
 		log.Errorf(ctx, "worker write error %v", err)
 	}
+
+	if !util.CheckLegalMaster(workerResp.ClusterInfo.NodeInfo) {
+		return workerResp, false, err
+	}
+
 	s.checkClusterInfo(workerResp.ClusterInfo.NodeInfo)
-	return workerResp, true, err
+
+	if workerResp.Role == raft_api.Role_MASTER {
+		return workerResp, true, err
+	}
+
+	return workerResp, false, err
 }
 
 func (s *Proxy) Write(ctx context.Context, in *raft_proxy.WriteRequest) (*raft_proxy.WriteResponse, error) {
 	req := &raft_api.WriteRequest{}
 	resp := &raft_proxy.WriteResponse{}
 	var err error
-	master := s.getMaster()
-	if master != nil {
-		workerResp, ok, err := s.wirteToNode(master, ctx, req)
-		if ok {
-			//TODO remove clusterinfo and return to client
-			resp.SeqId = int32(workerResp.Role)
-			return resp, err
-		}
+	wrokerResp, err := s.writeToMaster(ctx, req)
+	if wrokerResp == nil {
+		return resp, err
 	}
 
-	for _, v := range s.clusterInfo {
-		workerResp, ok, err := s.wirteToNode(v, ctx, req)
-		if ok {
-			//TODO remove clusterinfo and return to client
-			resp.SeqId = int32(workerResp.Role)
-			return resp, err
-		}
-	}
-
+	//todo remove clustinfo in reponse
 	return resp, err
 }
 
 func (s *Proxy) Read(ctx context.Context, in *raft_proxy.ReadRequest) (*raft_proxy.ReadResponse, error) {
 	workerClient := s.roundroubin()
 	req := &raft_api.ReadRequest{}
-	workerResp, err := workerClient.Read(ctx, req)
+	_, err := workerClient.Read(ctx, req)
 	if err != nil {
 		log.Errorf(ctx, "worker read error %v", err)
 	}
-
-	clusterInfo := workerResp.ClusterInfo.NodeInfo
-	s.checkClusterInfo(clusterInfo)
+	//todo clusterInfo to resp
 	resp := &raft_proxy.ReadResponse{}
 	return resp, nil
 }

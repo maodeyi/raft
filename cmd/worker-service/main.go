@@ -5,7 +5,7 @@ import (
 
 	"crypto/tls"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"github.com/maodeyi/raft/raft"
+	"github.com/maodeyi/raft/raft/worker"
 	raft_api "gitlab.bj.sensetime.com/mercury/protohub/api/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
@@ -23,8 +23,14 @@ func main() {
 
 	// grpc tls server
 	grpcServer := grpc.NewServer()
-	worker := raft.NewWorker()
-	worker.Init()
+	worker, err := worker.NewWorkerWarpper()
+	if err != nil {
+		grpclog.Fatalf("NewWorkerWarpper err:%v\n", err)
+	}
+	err = worker.Init()
+	if err != nil {
+		grpclog.Fatalf("worker.Init err:%v\n", err)
+	}
 	worker.Run()
 	raft_api.RegisterRaftServiceServer(grpcServer, worker)
 

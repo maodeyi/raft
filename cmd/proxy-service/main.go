@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/grpclog"
 
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"github.com/maodeyi/raft/raft"
+	"github.com/maodeyi/raft/raft/proxy"
 
 	raft_proxy "gitlab.bj.sensetime.com/mercury/protohub/api/raft-proxy"
 )
@@ -25,8 +25,11 @@ func main() {
 
 	// grpc tls server
 	grpcServer := grpc.NewServer()
-	proxy := raft.NewProxy()
-	proxy.Init()
+	proxy := proxy.NewProxy()
+	err = proxy.Init()
+	if err != nil {
+		grpclog.Fatalf("proxy Init err:%v\n", err)
+	}
 	raft_proxy.RegisterRaftProxyServer(grpcServer, proxy)
 
 	// gw server
