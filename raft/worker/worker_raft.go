@@ -19,11 +19,14 @@ import (
 //todo change cluster node info
 
 type Raft interface {
+	GetRole() api.Role
 	IsMaster() bool
+	Healthy() bool
 	LeaderElect()
 	RoleNotify() <-chan api.Role
 	SyncDoneNotify() <-chan bool
 	NotifyStart() <-chan bool
+	GetClusterInfo() []*api.NodeInfo
 }
 
 type HeartBead struct {
@@ -648,4 +651,23 @@ func (rf *WorkerRaft) SyncDoneNotify() <-chan bool {
 
 func (rf *WorkerRaft) NotifyStart() <-chan bool {
 	return rf.startCh
+}
+
+func (rf *WorkerRaft) Healthy() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	ok, _ := util.CheckLegalMaster(rf.clusterInfo)
+	return ok
+}
+
+func (rf *WorkerRaft) GetClusterInfo() []*api.NodeInfo {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.clusterInfo
+}
+
+func (rf *WorkerRaft) GetRole() api.Role {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state
 }

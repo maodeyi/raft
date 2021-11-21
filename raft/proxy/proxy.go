@@ -185,13 +185,13 @@ func (s *Proxy) Close() {
 	s.sniffer.Stop()
 }
 
-func (s *Proxy) roundroubin() api.StaticFeatureDBWorkerServiceClient {
+func (s *Proxy) roundroubin() *Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	length := len(s.Ids)
 	s.rrIndex++
 	index := s.rrIndex % int32(length)
-	return s.clusterInfo[s.Ids[index]].Client
+	return s.clusterInfo[s.Ids[index]]
 }
 
 func (s *Proxy) nodeIsEqual(src *api.NodeInfo, des *api.NodeInfo) bool {
@@ -276,7 +276,7 @@ func (s *Proxy) PingNode(_ context.Context, request *api.PingNodeRequest) (*api.
 func (s *Proxy) tryMaster() api.StaticFeatureDBWorkerServiceClient {
 	node := s.getMaster()
 	if node == nil {
-		node = s.roundroubin()
+		node = s.roundroubin().Client
 	}
 	return node
 }
@@ -329,20 +329,28 @@ func (s *Proxy) callMethod(ctx context.Context, client api.StaticFeatureDBWorker
 	switch v := req.(type) {
 	case *api.IndexNewRequest:
 		resp, err = client.IndexNew(ctx, v)
-		clusterInfo = resp.(*api.IndexNewResponse).ClusterInfo
+		if resp != nil {
+			clusterInfo = resp.(*api.IndexNewResponse).ClusterInfo
+		}
 	case *api.IndexDelRequest:
 		resp, err = client.IndexDel(ctx, v)
-		clusterInfo = resp.(*api.IndexDelResponse).ClusterInfo
+		if resp != nil {
+			clusterInfo = resp.(*api.IndexDelResponse).ClusterInfo
+		}
 	//case *api.IndexListRequest:
 	//	resp, err = client.IndexList(ctx, v)
 	//case *api.IndexGetRequest:
 	//	resp, err = client.IndexGet(ctx, v)
 	case *db.FeatureBatchAddRequest:
 		resp, err = client.FeatureBatchAdd(ctx, v)
-		clusterInfo = resp.(*api.FeatureBatchAddResponse).ClusterInfo
+		if resp != nil {
+			clusterInfo = resp.(*api.FeatureBatchAddResponse).ClusterInfo
+		}
 	case *db.FeatureBatchDeleteRequest:
 		resp, err = client.FeatureBatchDelete(ctx, v)
-		clusterInfo = resp.(*api.FeatureBatchDeleteResponse).ClusterInfo
+		if resp != nil {
+			clusterInfo = resp.(*api.FeatureBatchDeleteResponse).ClusterInfo
+		}
 		//case *db.FeatureBatchSearchRequest:
 		//	resp, err = client.FeatureSearch(ctx, v)
 	}
@@ -401,8 +409,25 @@ func (s *Proxy) IndexDel(ctx context.Context, request *api.IndexDelRequest) (*ap
 }
 
 func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*api.IndexListResponse, error) {
-	node := s.roundroubin()
-	return node.IndexList(ctx, request)
+	for true {
+		node := s.roundroubin()
+		resp, err := node.Client.IndexList(ctx, request)
+		if err != nil {
+			s.logger.Errorf("IndexList error", err)
+		}
+		if resp != nil && resp.ClusterInfo != nil {
+			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
+			if ok {
+				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+				return resp, err
+			} else {
+				continue
+			}
+		} else {
+			return resp, err
+		}
+	}
+	return nil, nil
 }
 
 func (s *Proxy) IndexTrain(_ context.Context, request *api.IndexTrainRequest) (*api.IndexTrainResponse, error) {
@@ -410,8 +435,25 @@ func (s *Proxy) IndexTrain(_ context.Context, request *api.IndexTrainRequest) (*
 }
 
 func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*api.IndexGetResponse, error) {
-	node := s.roundroubin()
-	return node.IndexGet(ctx, request)
+	for true {
+		node := s.roundroubin()
+		resp, err := node.Client.IndexGet(ctx, request)
+		if err != nil {
+			s.logger.Errorf("IndexGet error", err)
+		}
+		if resp != nil && resp.ClusterInfo != nil {
+			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
+			if ok {
+				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+				return resp, err
+			} else {
+				continue
+			}
+		} else {
+			return resp, err
+		}
+	}
+	return nil, nil
 }
 
 func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
@@ -425,8 +467,25 @@ func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatch
 }
 
 func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
-	node := s.roundroubin()
-	return node.FeatureBatchSearch(ctx, request)
+	for true {
+		node := s.roundroubin()
+		resp, err := node.Client.FeatureBatchSearch(ctx, request)
+		if err != nil {
+			s.logger.Errorf("FeatureBatchSearch error", err)
+		}
+		if resp != nil && resp.ClusterInfo != nil {
+			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
+			if ok {
+				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+				return resp, err
+			} else {
+				continue
+			}
+		} else {
+			return resp, err
+		}
+	}
+	return nil, nil
 }
 
 func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*api.FeatureUpdateResponse, error) {

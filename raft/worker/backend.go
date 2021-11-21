@@ -167,6 +167,8 @@ func (b *backend) handleRoleChange(old, new api.Role) {
 
 func (b *backend) isMaster() bool { return b.raft.IsMaster() }
 
+func (b *backend) Healthy() bool { return b.raft.Healthy() }
+
 // TODO yore: change to use raft instead of sniffer.
 func (b *backend) writePreflight() error {
 	if !b.isMaster() {
@@ -231,9 +233,18 @@ func (b *backend) handleRequest(req *reqWrap) {
 }
 
 func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, error) {
-	if !b.isMaster() {
-		return nil, util.ErrNotLeader
+	resp := &api.IndexNewResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
 	}
+	resp.ClusterInfo = clusterInfo
+
+	if !b.isMaster() || !b.Healthy() {
+		return resp, util.ErrNotLeader
+	}
+
 	if req.GetUuid() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid index id")
 	}
@@ -244,11 +255,8 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	// 2. create memory index
 	mi := newMemoryIndex(req.GetUuid(), seq)
 
-	if err := b.writePreflight(); err != nil {
-		return nil, err
-	}
+	err := b.MongoClient.InsertOpLog(req.GetUuid(), "create_db", "", "", seq)
 	// 3. TODO yore: write oplog
-	var err error // write oplog error
 	if err != nil {
 		b.gen.Rollback() // rollback seq
 	}
@@ -258,25 +266,32 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	b.indexes[req.GetUuid()] = mi
 	b.mu.Unlock()
 
-	return &api.IndexNewResponse{
-		Uuid:         req.GetUuid(),
-		Status:       sfd_db.Status_INITED,
-		Size:         0,
-		CreationTime: timestamppb.Now(),
-		LastSeqId:    seq,
-	}, nil
+	resp.Uuid = req.GetUuid()
+	resp.Status = sfd_db.Status_INITED
+	resp.Size = 0
+	resp.CreationTime = timestamppb.Now()
+	resp.LastSeqId = seq
+	return resp, nil
 }
 
 func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, error) {
-	if !b.isMaster() {
-		return nil, util.ErrNotLeader
+	resp := &api.IndexDelResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
+	}
+	resp.ClusterInfo = clusterInfo
+
+	if !b.isMaster() || !b.Healthy() {
+		return resp, util.ErrNotLeader
 	}
 	id := req.GetIndexUuid()
 	if _, ok := b.indexes[id]; !ok {
 		return nil, util.ErrIndexNotFound
 	}
 	// 1. TODO yore: write oplog
-	var err error // write oplog error
+	err := b.MongoClient.InsertOpLog(id, "del_db", "", "", b.gen.GetSeq()+1)
 	if err != nil {
 		b.gen.Rollback() // rollback seq
 	}
@@ -287,13 +302,24 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 	delete(b.indexes, id)
 	b.mu.Unlock()
 
-	return &api.IndexDelResponse{}, nil
+	return resp, nil
 }
 
 func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, error) {
-	resp := api.IndexListResponse{
-		Indexes: make([]*sfd_db.IndexInfo, 0, len(b.indexes)),
+	resp := &api.IndexListResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
 	}
+	resp.ClusterInfo = clusterInfo
+
+	if b.isMaster() && !b.Healthy() {
+		return resp, util.ErrNotLeader
+	}
+
+	resp.Indexes = make([]*sfd_db.IndexInfo, 0, len(b.indexes))
+
 	for k, v := range b.indexes {
 		resp.Indexes = append(resp.Indexes, &sfd_db.IndexInfo{
 			Uuid:      k,
@@ -301,32 +327,53 @@ func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, er
 			LastSeqId: v.seqID,
 		})
 	}
-	return &resp, nil
+	return resp, nil
 }
 
 func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, error) {
+	resp := &api.IndexGetResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
+	}
+	resp.ClusterInfo = clusterInfo
+
+	if b.isMaster() && !b.Healthy() {
+		return resp, util.ErrNotLeader
+	}
+
 	id := req.GetIndexUuid()
 	if index, ok := b.indexes[id]; !ok {
 		return nil, util.ErrIndexNotFound
 	} else {
-		return &api.IndexGetResponse{Index: &sfd_db.IndexInfo{
+		resp.Index = &sfd_db.IndexInfo{
 			Uuid:      id,
 			Size:      index.size(),
 			LastSeqId: index.seqID,
-		}}, nil
+		}
+		return resp, nil
 	}
 }
 
 func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
-	if !b.isMaster() {
-		return nil, util.ErrNotLeader
+	resp := &api.FeatureBatchAddResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
+	}
+	resp.ClusterInfo = clusterInfo
+
+	if !b.isMaster() || !b.Healthy() {
+		return resp, util.ErrNotLeader
 	}
 
 	indexID := req.GetColId()
 	items := req.GetItems()
 	index, ok := b.indexes[indexID]
 	if !ok {
-		return nil, util.ErrIndexNotFound
+		return resp, util.ErrIndexNotFound
 	}
 
 	features := make([]*memoryFeature, 0, len(items))
@@ -350,30 +397,35 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 	}
 
 	// 2. TODO yore: write oplog
-	if err := b.writePreflight(); err != nil {
-		return nil, err
+	for index, v := range ids {
+		err := b.MongoClient.InsertOpLog(indexID, "add", "", "", b.gen.GetSeq()+1)
 	}
 
 	// 3. save to memory
 	index.add(features)
-
-	return &api.FeatureBatchAddResponse{
-		Results: results,
-		Ids:     ids,
-	}, nil
+	resp.Results = results
+	resp.Ids = ids
+	return resp, nil
 }
 
-func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*sfd_db.FeatureBatchDeleteResponse, error) {
-	if !b.isMaster() {
-		return nil, util.ErrNotLeader
+func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.FeatureBatchDeleteResponse, error) {
+	resp := &api.FeatureBatchDeleteResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
 	}
+	resp.ClusterInfo = clusterInfo
 
+	if !b.isMaster() || !b.Healthy() {
+		return resp, util.ErrNotLeader
+	}
 	indexID := req.GetColId()
 	ids := req.GetIds()
 
 	index, ok := b.indexes[indexID]
 	if !ok {
-		return nil, util.ErrIndexNotFound
+		return resp, util.ErrIndexNotFound
 	}
 
 	// 1. parse ids
@@ -403,11 +455,23 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*sfd_d
 
 	// 3. delete in memory
 	index.del(seqs)
+	resp.Results = results
 
-	return &sfd_db.FeatureBatchDeleteResponse{Results: results}, nil
+	return resp, nil
 }
 
-func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.FeatureBatchSearchResponse, error) {
+func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
+	resp := &api.FeatureBatchSearchResponse{}
+	nodeInfo := b.raft.GetClusterInfo()
+	clusterInfo := &api.ClusterInfo{
+		NodeInfo: nodeInfo,
+		Role:     b.raft.GetRole(),
+	}
+	resp.ClusterInfo = clusterInfo
+
+	if b.isMaster() && !b.Healthy() {
+		return resp, util.ErrNotLeader
+	}
 	indexID := req.GetColId()
 	items := req.GetFeatures()
 
@@ -417,14 +481,14 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.
 	}
 
 	results := make([]*commonapis.Result, len(items))
-	resp := make([]*sfd_db.OneFeatureResult, len(items))
+	one := make([]*sfd_db.OneFeatureResult, len(items))
 	features := make([][]float32, 0, len(items))
 	mapping := make(map[int]int, len(items)) // features idx -> results idx
 	for i, v := range items {
 		f := parseFeature(v.GetBlob())
 		if f == nil {
 			results[i] = &commonapis.Result{Code: 3, Error: "invalid feature"}
-			resp[i] = &sfd_db.OneFeatureResult{}
+			one[i] = &sfd_db.OneFeatureResult{}
 			continue
 		}
 		results[i] = &commonapis.Result{}
@@ -442,21 +506,23 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*sfd_db.
 				IndexId: indexID,
 			})
 		}
-		resp[mapping[i]] = &sfd_db.OneFeatureResult{Results: ret}
+		one[mapping[i]] = &sfd_db.OneFeatureResult{Results: ret}
 	}
-
-	return &sfd_db.FeatureBatchSearchResponse{
-		Results:        results,
-		FeatureResults: resp,
-		ColId:          indexID,
-		IsRefined:      true,
-	}, nil
+	resp.Results = results
+	resp.FeatureResults = one
+	resp.ColId = indexID
+	resp.IsRefined = true
+	return resp, nil
 }
 
 func (b *backend) RepalyOplogs() error {
 	op, err := b.MongoClient.GetOplog(b.gen.GetSeq())
 	if op != nil {
-		if op.Operation == "add" {
+		if op.Operation == "create_db" {
+
+		} else if op.Operation == "del_db" {
+
+		} else if op.Operation == "add" {
 			req := &sfd_db.FeatureBatchAddRequest{
 				ColId: op.ColId,
 			}
