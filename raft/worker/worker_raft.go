@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"github.com/maodeyi/raft/raft/sniffer"
 	"github.com/maodeyi/raft/raft/util"
 	"github.com/sirupsen/logrus"
 	"math/rand"
@@ -22,6 +23,7 @@ type Raft interface {
 	LeaderElect()
 	RoleNotify() <-chan api.Role
 	SyncDoneNotify() <-chan bool
+	NotifyStart() <-chan bool
 }
 
 type HeartBead struct {
@@ -40,11 +42,14 @@ type WorkerRaft struct {
 	mu          sync.Mutex                                        // Lock to protect shared access to this peer's state
 	peers       map[string]api.StaticFeatureDBWorkerServiceClient // RPC end points of all peers
 	clusterInfo []*api.NodeInfo
+	sniffer     *sniffer.Sniffer
 	backend     Worker
 	logger      *logrus.Entry
 	me          string // this peer's index into peers[]
 	syncdone    chan bool
+	closeCh     chan struct{}
 
+	workerNum   int32
 	currentTerm int32
 	votedFor    string
 
@@ -56,49 +61,96 @@ type WorkerRaft struct {
 	heartBeatCh     chan bool
 	isMasterCh      chan api.Role
 	leaderCh        chan bool
+	startCh         chan bool
 	totalVotes      int
 	timer           *time.Timer
 }
 
-//todo add worker_id
-func (rf *WorkerRaft) initPeer() (client api.StaticFeatureDBWorkerServiceClient, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (rf *WorkerRaft) addPeer(nodeInfo *api.NodeInfo) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
+	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	nodeInfo := &api.NodeInfo{
-		Id:   "1",
-		Ip:   "127.0.0.1",
-		Port: "8080",
-		Role: api.Role_SLAVE,
-	}
 	if err != nil {
 		rf.clusterInfo = append(rf.clusterInfo, nodeInfo)
-		return nil, err
+		rf.peers[nodeInfo.Id] = nil
+		return err
 	}
 
 	nodeInfo.LastStatus = false
 	rf.clusterInfo = append(rf.clusterInfo, nodeInfo)
-	return api.NewStaticFeatureDBWorkerServiceClient(conn), nil
+
+	rf.peers[nodeInfo.Id] = api.NewStaticFeatureDBWorkerServiceClient(conn)
+	return nil
+}
+
+func (rf *WorkerRaft) subWokersStauts() {
+	//todo every node has same name???????
+	addrs, ch := rf.sniffer.Subscribe("worker")
+	for k, v := range addrs {
+		rf.mu.Lock()
+		if len(rf.peers) > int(rf.workerNum/2) {
+			rf.startCh <- true
+		}
+
+		if len(rf.peers) == int(rf.workerNum) {
+			rf.mu.Unlock()
+			break
+		}
+		rf.mu.Unlock()
+
+		nodeInfo, err := util.BuildNodeInfo(k, v)
+		if err != nil {
+			rf.logger.Errorf("BuildNodeInfo error %s %s %v", k, v, err)
+			continue
+		}
+		rf.mu.Lock()
+		err = rf.addPeer(nodeInfo)
+		rf.mu.Unlock()
+		if err != nil {
+			rf.logger.Errorf("proxy inti worker peer error %v", err)
+			close(rf.closeCh)
+			return
+		}
+
+	}
+
+	for true {
+		select {
+		case <-rf.closeCh:
+			return
+		case msg := <-ch:
+			if msg.Begin {
+				rf.mu.Lock()
+				_, ok := rf.peers[msg.WorkerID]
+				if !ok && len(rf.peers) < int(rf.workerNum) {
+					nodeInfo, err := util.BuildNodeInfo(msg.WorkerID, msg.Address)
+					if err != nil {
+						rf.logger.Errorf("BuildNodeInfo error %s %s %v", msg.WorkerID, msg.Address, err)
+					}
+					err = rf.addPeer(nodeInfo)
+					if err != nil {
+						rf.logger.Errorf("worker inti node peer error %v", err)
+					}
+					if len(rf.peers) == int(rf.workerNum/2+1) {
+						select {
+						case rf.startCh <- true:
+						default:
+						}
+					}
+				}
+				rf.mu.Unlock()
+			}
+		}
+	}
 }
 
 func (rf *WorkerRaft) Init(backend *backend) error {
-
 	rf.peers = make(map[string]api.StaticFeatureDBWorkerServiceClient)
-	//todo init peers
-	for i := 0; i < 5; i++ {
-		peerClient, err := rf.initPeer()
-		if err != nil {
-			return err
-		}
-		rf.peers["id"] = peerClient
-	}
+	go rf.subWokersStauts()
 
-	//todo persister
-	//rf.persister = persister
-	//rf.me = me
+	//todo get self id ip
+	rf.me = me
 	rf.backend = backend
 	rf.currentTerm = 0
 	rf.votedFor = ""
@@ -107,7 +159,7 @@ func (rf *WorkerRaft) Init(backend *backend) error {
 
 	rf.state = api.Role_SLAVE
 	rf.syncdone = make(chan bool)
-
+	rf.closeCh = make(chan struct{})
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
 	rf.grantVoteCh = make(chan bool)
 	rf.heartBeatCh = make(chan bool)
@@ -118,55 +170,66 @@ func (rf *WorkerRaft) Init(backend *backend) error {
 	return nil
 }
 
+func (rf *WorkerRaft) Close() {
+	close(rf.closeCh)
+	rf.sniffer.Stop()
+}
+
 func (rf *WorkerRaft) LeaderElect() {
 	rf.backend.subscribeOpLogs()
 	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	go func() {
 		for {
-			time.Sleep(200 * time.Millisecond)
-			rf.mu.Lock()
-			state := rf.state
-			rf.mu.Unlock()
-			switch {
-			case state == api.Role_MASTER:
-				rf.logger.Infof("Candidate %d: l become leader now!!! Current term is %d\n", rf.me, rf.currentTerm)
-				rf.startHeartBeat()
-			case state == api.Role_Candidate:
-				rf.logger.Infof("================ Candidate %d start election!!! ================\n", rf.me)
-				go rf.startRequestVote()
-				select {
-				case <-rf.heartBeatCh:
-					rf.logger.Infof("Candidate %d: receive heartbeat when requesting votes, turn back to follower\n", rf.me)
-					rf.mu.Lock()
-					rf.convertToFollower(rf.currentTerm, "")
-					rf.mu.Unlock()
-				case <-rf.leaderCh:
-				case <-rf.timer.C:
-					rf.mu.Lock()
-					if rf.state == api.Role_SLAVE {
-						rf.logger.Infof("Candidate %d: existing a higher term candidate, withdraw from the election\n", rf.me)
-						rf.mu.Unlock()
-						continue
-					}
-					rf.convertToCandidate()
-					rf.mu.Unlock()
-				}
-			case state == api.Role_SLAVE:
+			select {
+			case <-rf.closeCh:
+				rf.logger.Infof("close worker raft")
+				return
+			default:
+				time.Sleep(200 * time.Millisecond)
 				rf.mu.Lock()
-				rf.drainOldTimer()
-				rf.electionTimeout = GenerateElectionTimeout(200, 400)
-				rf.timer.Reset(time.Duration(rf.electionTimeout) * time.Millisecond)
+				state := rf.state
 				rf.mu.Unlock()
-				select {
-				case <-rf.grantVoteCh:
-					rf.logger.Infof("Server %d: reset election time due to grantVote\n", rf.me)
-				case <-rf.heartBeatCh:
-					rf.logger.Infof("Server %d: reset election time due to heartbeat\n", rf.me)
-				case <-rf.timer.C:
-					rf.logger.Infof("Server %d: election timeout, turn to candidate\n", rf.me)
+				switch {
+				case state == api.Role_MASTER:
+					rf.logger.Infof("Candidate %d: l become leader now!!! Current term is %d\n", rf.me, rf.currentTerm)
+					rf.startHeartBeat()
+				case state == api.Role_Candidate:
+					rf.logger.Infof("================ Candidate %d start election!!! ================\n", rf.me)
+					go rf.startRequestVote()
+					select {
+					case <-rf.heartBeatCh:
+						rf.logger.Infof("Candidate %d: receive heartbeat when requesting votes, turn back to follower\n", rf.me)
+						rf.mu.Lock()
+						rf.convertToFollower(rf.currentTerm, "")
+						rf.mu.Unlock()
+					case <-rf.leaderCh:
+					case <-rf.timer.C:
+						rf.mu.Lock()
+						if rf.state == api.Role_SLAVE {
+							rf.logger.Infof("Candidate %d: existing a higher term candidate, withdraw from the election\n", rf.me)
+							rf.mu.Unlock()
+							continue
+						}
+						rf.convertToCandidate()
+						rf.mu.Unlock()
+					}
+				case state == api.Role_SLAVE:
 					rf.mu.Lock()
-					rf.convertToCandidate()
+					rf.drainOldTimer()
+					rf.electionTimeout = GenerateElectionTimeout(200, 400)
+					rf.timer.Reset(time.Duration(rf.electionTimeout) * time.Millisecond)
 					rf.mu.Unlock()
+					select {
+					case <-rf.grantVoteCh:
+						rf.logger.Infof("Server %d: reset election time due to grantVote\n", rf.me)
+					case <-rf.heartBeatCh:
+						rf.logger.Infof("Server %d: reset election time due to heartbeat\n", rf.me)
+					case <-rf.timer.C:
+						rf.logger.Infof("Server %d: election timeout, turn to candidate\n", rf.me)
+						rf.mu.Lock()
+						rf.convertToCandidate()
+						rf.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -443,6 +506,11 @@ func (rf *WorkerRaft) startRequestVote() {
 func (rf *WorkerRaft) sendRequestVote(client api.StaticFeatureDBWorkerServiceClient, request *api.RequestVoteRequest) (*api.RequestVoteResponse, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
+
+	if client == nil {
+		return nil, false
+	}
+
 	response, err := client.RequestVote(ctx, request)
 	if err == nil {
 		return response, true
@@ -576,4 +644,8 @@ func (rf *WorkerRaft) RoleNotify() <-chan api.Role {
 
 func (rf *WorkerRaft) SyncDoneNotify() <-chan bool {
 	return rf.syncdone
+}
+
+func (rf *WorkerRaft) NotifyStart() <-chan bool {
+	return rf.startCh
 }

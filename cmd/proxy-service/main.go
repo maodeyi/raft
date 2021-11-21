@@ -6,7 +6,10 @@ import (
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
@@ -55,7 +58,24 @@ func main() {
 		grpclog.Fatal("ListenAndServe: ", err)
 	}
 
-	return
+	defer func() {
+		proxy.Close()
+		if err := srv.Shutdown(ctx); err != nil {
+			grpclog.Errorf("shutdown: ", err)
+		}
+		grpcServer.GracefulStop()
+	}()
+
+	// listen signal
+	signals := make(chan os.Signal, 3)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	for {
+		select {
+		case s := <-signals:
+			grpclog.Infof("received signal %v", s)
+			return
+		}
+	}
 }
 
 // grpcHandlerFunc returns an http.Handler that delegates to grpcServer on incoming gRPC

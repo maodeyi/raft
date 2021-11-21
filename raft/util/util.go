@@ -1,8 +1,10 @@
 package util
 
 import (
+	"errors"
 	"github.com/maodeyi/raft/raft/proxy"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
+	"strings"
 )
 
 func CheckLegalMaster(clusterInfo []*api.NodeInfo) (bool, []string) {
@@ -29,4 +31,18 @@ func CloneClusterInfo(tags map[string]*proxy.Node) map[string]*proxy.Node {
 		cloneTags[k] = v
 	}
 	return cloneTags
+}
+
+func BuildNodeInfo(id, addrs string) (*api.NodeInfo, error) {
+	addr := strings.Split(addrs, ":")
+	if len(addr) < 2 {
+		return nil, errors.New("error addrs format")
+	}
+	return &api.NodeInfo{
+		Id:         id,
+		Ip:         addr[0],
+		Port:       addr[1],
+		LastStatus: false,
+		Role:       api.Role_SLAVE,
+	}, nil
 }

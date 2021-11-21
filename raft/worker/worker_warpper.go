@@ -39,6 +39,11 @@ func (s *WorkerWarpper) Run() {
 	s.b.Run()
 }
 
+func (s *WorkerWarpper) Close() {
+	s.b.stop()
+	s.workerRaft.Close()
+}
+
 func (s *WorkerWarpper) RequestVote(ctx context.Context, in *api.RequestVoteRequest) (*api.RequestVoteResponse, error) {
 	return s.workerRaft.RequestVoteChannel(in), nil
 }

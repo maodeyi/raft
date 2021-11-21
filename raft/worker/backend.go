@@ -75,11 +75,16 @@ func (b *backend) Run() {
 	// 1. recover
 	b.recover()
 
+	select {
+	case <-b.raft.NotifyStart():
+	}
+
 	// 2. start leader electing
 	b.raft.LeaderElect() // just start cluster
 
 	// 2. main loop
 	go b.mainLoop()
+
 }
 
 func (b *backend) mainLoop() {

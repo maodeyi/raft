@@ -12,6 +12,7 @@ import (
 	"github.com/maodeyi/raft/raft/util"
 	"github.com/sirupsen/logrus"
 	//"gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/db"
+	"github.com/maodeyi/raft/raft/sniffer"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"google.golang.org/grpc"
 )
@@ -30,16 +31,24 @@ type NodesStatus struct {
 
 type Proxy struct {
 	mu          sync.Mutex
+	workerNum   int32
 	rrIndex     int32
 	clusterInfo map[string]*Node
+	sniffer     *sniffer.Sniffer
 	Ids         []string
+	closeCh     chan struct{}
+	startCh     chan bool
 	logger      *logrus.Entry
 }
 
+//todo
 func NewProxy() *Proxy {
 	rf := &Proxy{
+		sniffer: sniffer.NewSniffer("//dns.***"),
 		logger:  logrus.StandardLogger().WithField("component", "Proxy"),
 		rrIndex: -1,
+		closeCh: make(chan struct{}),
+		startCh: make(chan bool),
 	}
 	return rf
 }
@@ -56,18 +65,18 @@ func (s *Proxy) destoryWorkNode(node *Node) error {
 	return node.Conn.Close()
 }
 
-func (s *Proxy) initWorkNode(nodeInfo *api.NodeInfo) (*Node, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *Proxy) addWorkNode(nodeInfo *api.NodeInfo) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, "127.0.0.1:8080", grpc.WithInsecure())
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())
+	//
+	//s.mu.Lock()
+	//defer s.mu.Unlock()
 	node := &Node{
 		NodeInfo: &api.NodeInfo{
-			Id:   "1",
-			Ip:   "127.0.0.1",
-			Port: "8080",
+			Id:   nodeInfo.Id,
+			Ip:   nodeInfo.Ip,
+			Port: nodeInfo.Port,
 			Role: api.Role_SLAVE,
 		},
 		ClusterStatus: true,
@@ -80,8 +89,9 @@ func (s *Proxy) initWorkNode(nodeInfo *api.NodeInfo) (*Node, error) {
 		node.Client = api.NewStaticFeatureDBWorkerServiceClient(conn)
 		node.Conn = conn
 	}
+	s.clusterInfo[node.NodeInfo.Id] = node
 	s.Ids = append(s.Ids, node.NodeInfo.Id)
-	return node, err
+	return err
 }
 
 func (s *Proxy) getMaster() api.StaticFeatureDBWorkerServiceClient {
@@ -95,21 +105,84 @@ func (s *Proxy) getMaster() api.StaticFeatureDBWorkerServiceClient {
 	return nil
 }
 
-func (s *Proxy) Init() error {
-	//todo init clusterInfo
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.clusterInfo = make(map[string]*Node)
-	//todo init ip port id default slave
-	for _, v := range s.clusterInfo {
-		workerNode, err := s.initWorkNode(v.NodeInfo)
+func (s *Proxy) subWokersStauts() {
+	addrs, ch := s.sniffer.Subscribe("proxy")
+	for k, v := range addrs {
+		s.mu.Lock()
+		if len(s.clusterInfo) > int(s.workerNum/2) {
+			s.startCh <- true
+		}
+
+		if len(s.clusterInfo) == int(s.workerNum) {
+			s.mu.Unlock()
+			break
+		}
+
+		s.mu.Unlock()
+
+		nodeInfo, err := util.BuildNodeInfo(k, v)
+		if err != nil {
+			s.logger.Errorf("BuildNodeInfo error %s %s %v", k, v, err)
+			continue
+		}
+		s.mu.Lock()
+		err = s.addWorkNode(nodeInfo)
+		s.mu.Unlock()
 		if err != nil {
 			s.logger.Errorf("proxy inti worker peer error %v", err)
 		}
 
-		s.clusterInfo[v.NodeInfo.Id] = workerNode
 	}
-	return nil
+
+	for true {
+		select {
+		case <-s.closeCh:
+			return
+		case msg := <-ch:
+			if msg.Begin {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				_, ok := s.clusterInfo[msg.WorkerID]
+				if !ok && len(s.clusterInfo) < int(s.workerNum) {
+					nodeInfo, err := util.BuildNodeInfo(msg.WorkerID, msg.Address)
+					if err != nil {
+						s.logger.Errorf("BuildNodeInfo error %s %s %v", msg.WorkerID, msg.Address, err)
+					}
+					err = s.addWorkNode(nodeInfo)
+					if err != nil {
+						s.logger.Errorf("proxy inti worker peer error %v", err)
+					}
+					if len(s.clusterInfo) == int(s.workerNum/2+1) {
+						select {
+						case s.startCh <- true:
+						default:
+						}
+					}
+					if len(s.clusterInfo) == int(s.workerNum) {
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
+func (s *Proxy) Init() error {
+	s.sniffer.Start()
+	s.clusterInfo = make(map[string]*Node)
+	go s.subWokersStauts()
+
+	s.logger.Infof("waiting for %d worker start...", s.workerNum/2+1)
+	select {
+	case <-s.startCh:
+		s.logger.Infof("%d worker start over, start service", s.workerNum/2+1)
+		return nil
+	}
+}
+
+func (s *Proxy) Close() {
+	close(s.closeCh)
+	s.sniffer.Stop()
 }
 
 func (s *Proxy) roundroubin() api.StaticFeatureDBWorkerServiceClient {
@@ -154,12 +227,10 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) string {
 		//add
 		node, ok := s.clusterInfo[v.Id]
 		if !ok {
-			node, err := s.initWorkNode(v)
+			err := s.addWorkNode(v)
 			if err != nil {
-				s.logger.Errorf("initWorkNode error %v", err)
+				s.logger.Errorf("checkClusterInfo AddWorkNode error %v", err)
 			}
-			s.clusterInfo[v.Id] = node
-			continue
 		}
 
 		//update
@@ -168,11 +239,10 @@ func (s *Proxy) checkClusterInfo(clusterInfo []*api.NodeInfo) string {
 			if err != nil {
 				s.logger.Errorf("destoryWorkNode error %v", err)
 			}
-			node, err := s.initWorkNode(v)
+			err = s.addWorkNode(v)
 			if err != nil {
-				s.logger.Errorf("initWorkNode error %v", err)
+				s.logger.Errorf("checkClusterInfo AddWorkNode error %v", err)
 			}
-			s.clusterInfo[v.Id] = node
 		} else if s.clusterInfo[v.Id].NodeInfo.Role != v.Role {
 			s.clusterInfo[v.Id].NodeInfo.Role = v.Role
 		}

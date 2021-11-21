@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"crypto/tls"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
@@ -56,8 +59,24 @@ func main() {
 	if err = srv.Serve(tls.NewListener(conn, srv.TLSConfig)); err != nil {
 		grpclog.Fatal("ListenAndServe: ", err)
 	}
+	defer func() {
+		worker.Close()
+		if err := srv.Shutdown(ctx); err != nil {
+			grpclog.Errorf("shutdown: ", err)
+		}
+		grpcServer.GracefulStop()
+	}()
 
-	return
+	// listen signal
+	signals := make(chan os.Signal, 3)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	for {
+		select {
+		case s := <-signals:
+			grpclog.Infof("received signal %v", s)
+			return
+		}
+	}
 }
 
 // grpcHandlerFunc returns an http.Handler that delegates to grpcServer on incoming gRPC
