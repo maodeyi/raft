@@ -65,7 +65,7 @@ type OP struct {
 }
 
 func (m *MongoClient) InsertOpLog(colId, action string, features, featureIds, keys []string, seqIds []int64) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	var doc []interface{}
 	var err error
@@ -99,7 +99,7 @@ func (m *MongoClient) InsertOpLog(colId, action string, features, featureIds, ke
 
 func (m *MongoClient) GetOplog(begin int64) (*OP, error) {
 	var result OP
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	//cursor, err:= m.collection_op.Find(ctx, bson.M{"seqid": bson.M{"$gt": begin}})
 	//if err != nil {
@@ -117,23 +117,22 @@ func (m *MongoClient) GetOplog(begin int64) (*OP, error) {
 	return &result, err
 }
 
-type ServerStatus struct {
-	Id       primitive.ObjectID `json:"id" bson:"_id,omitempty"`
-	ServerId string             `json:"server_id"`
-	SeqId    int32              `json:"seq_id"`
+type ClusterConfig struct {
+	Id        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	WorkerNum int32              `json:"worker_num"`
 }
 
-func (m *MongoClient) SaveServerStatus(server_id string, seq_id int32) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+func (m *MongoClient) SaveClusterConfig(workerNum int32) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := m.collection_status.InsertOne(ctx, bson.D{{"server_id", server_id}, {"seq_id", seq_id}})
+	_, err := m.collection_status.InsertOne(ctx, bson.D{{"worker_num", workerNum}})
 	return err
 }
 
-func (m *MongoClient) LoadServerStatus(server_id string) (*ServerStatus, error) {
-	result := ServerStatus{}
+func (m *MongoClient) LoadClusterConfig() (*ClusterConfig, error) {
+	result := ClusterConfig{}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	err := m.collection_op.FindOne(ctx, bson.M{"server_id": bson.M{"$eq": server_id}}).Decode(&result)
+	err := m.collection_op.FindOne(ctx, bson.M{}).Decode(&result)
 	return &result, err
 }

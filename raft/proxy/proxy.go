@@ -168,6 +168,7 @@ func (s *Proxy) subWokersStauts() {
 }
 
 func (s *Proxy) Init() error {
+	//todo get mongo workernumer
 	s.sniffer.Start()
 	s.clusterInfo = make(map[string]*Node)
 	go s.subWokersStauts()

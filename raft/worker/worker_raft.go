@@ -148,6 +148,7 @@ func (rf *WorkerRaft) subWokersStauts() {
 	}
 }
 
+//todo get workernumber from mongo
 func (rf *WorkerRaft) Init(backend *backend) error {
 	rf.peers = make(map[string]api.StaticFeatureDBWorkerServiceClient)
 	go rf.subWokersStauts()
