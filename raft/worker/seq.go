@@ -14,6 +14,8 @@ func newGenerator(lastSeq int64) *generator {
 	}
 }
 
+//todo get and add when insert must be automitic
+
 func (g *generator) GetSeq() int64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -255,8 +255,7 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	// 2. create memory index
 	mi := newMemoryIndex(req.GetUuid(), seq)
 
-	err := b.MongoClient.InsertOpLog(req.GetUuid(), "create_db", "", "", seq)
-	// 3. TODO yore: write oplog
+	err := b.MongoClient.InsertOpLog(req.GetUuid(), db.DB_CREATE, []string{}, []string{}, []string{}, []int64{seq})
 	if err != nil {
 		b.gen.Rollback() // rollback seq
 	}
@@ -290,8 +289,9 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 	if _, ok := b.indexes[id]; !ok {
 		return nil, util.ErrIndexNotFound
 	}
+	seq := b.gen.GetSeq() + 1
 	// 1. TODO yore: write oplog
-	err := b.MongoClient.InsertOpLog(id, "del_db", "", "", b.gen.GetSeq()+1)
+	err := b.MongoClient.InsertOpLog(id, db.DB_DEL, []string{}, []string{}, []string{}, []int64{seq})
 	if err != nil {
 		b.gen.Rollback() // rollback seq
 	}
@@ -379,6 +379,9 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 	features := make([]*memoryFeature, 0, len(items))
 	results := make([]*commonapis.Result, 0, len(items))
 	ids := make([]string, 0, len(items))
+	var feats []string
+	var keys []string
+	var seqs []int64
 	// 1. parse feature
 	for i, v := range items {
 		raw := parseFeature(v.GetFeature().GetBlob())
@@ -387,6 +390,9 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 			ids = append(ids, "")
 			continue
 		}
+		feats = append(feats, base64.StdEncoding.EncodeToString(v.GetFeature().GetBlob()))
+		keys = append(keys, v.GetKey())
+		seqs = append(seqs, b.gen.GetSeq()+int64(1+i))
 		results = append(results, &commonapis.Result{Code: 0, Error: "", Status: 0})
 		ids = append(ids, genFeatureID(indexID, b.gen.GetSeq()+int64(1+i)))
 		features = append(features, &memoryFeature{
@@ -394,11 +400,13 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 			key: v.GetKey(),
 			seq: b.gen.GetSeq() + int64(1+i),
 		})
+
 	}
 
 	// 2. TODO yore: write oplog
-	for index, v := range ids {
-		err := b.MongoClient.InsertOpLog(indexID, "add", "", "", b.gen.GetSeq()+1)
+	err := b.MongoClient.InsertOpLog(indexID, db.FEATURE_ADD, feats, ids, keys, seqs)
+	if err != nil {
+		return resp, err
 	}
 
 	// 3. save to memory
@@ -447,7 +455,7 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.F
 	}
 
 	// 2. TODO yore: write oplog
-	if err := b.writePreflight(); err != nil {
+	if err := b.MongoClient.InsertOpLog(indexID, db.FEATURE_DEL, []string{}, ids, []string{}, seqs); err != nil {
 		return nil, err
 	}
 
@@ -518,47 +526,42 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*api.Fea
 func (b *backend) RepalyOplogs() error {
 	op, err := b.MongoClient.GetOplog(b.gen.GetSeq())
 	if op != nil {
-		if op.Operation == "create_db" {
-
-		} else if op.Operation == "del_db" {
-
-		} else if op.Operation == "add" {
-			req := &sfd_db.FeatureBatchAddRequest{
-				ColId: op.ColId,
+		if op.Operation == db.DB_DEL {
+			b.mu.Lock()
+			b.indexes[op.FeatureId].release()
+			delete(b.indexes, op.FeatureId)
+			b.mu.Unlock()
+			b.gen.NextSeq()
+		} else if op.Operation == db.DB_CREATE {
+			mi := newMemoryIndex(op.ColId, op.SeqId)
+			b.mu.Lock()
+			b.indexes[op.ColId] = mi
+			b.mu.Unlock()
+			b.gen.NextSeq()
+		} else if op.Operation == db.FEATURE_ADD {
+			index, ok := b.indexes[op.ColId]
+			if !ok {
+				b.logger.Error("replay log db.FEATURE_ADD err")
+				return util.ErrIndexNotFound
 			}
 			blob, _ := base64.StdEncoding.DecodeString(op.Feature)
-			feature := &commonapis.ObjectFeature{
-				Type:    "",
-				Version: 0,
-				Blob:    blob,
-			}
-			featureItem := &sfd_db.FeatureItem{
-				Id:        "",
-				SeqId:     op.SeqId,
-				Feature:   feature,
-				ImageId:   "",
-				ExtraInfo: "",
-				MetaData:  nil,
-				Key:       "",
-			}
-			req.Items = append(req.Items, featureItem)
+			raw := parseFeature(blob)
+			var features []*memoryFeature
+			features = append(features, &memoryFeature{
+				raw: raw,
+				key: op.Key,
+				seq: op.SeqId,
+			})
 
-			_, err := b.featureBatchAdd(req)
-			if err != nil {
-				b.logger.Errorf("SyncOplos featureBatchAdd error %v", err)
-				return util.ErrOplogNotEnd
-			}
+			index.add(features)
 			b.gen.NextSeq()
-		} else if op.Operation == "del" {
-			req := &sfd_db.FeatureBatchDeleteRequest{
-				ColId: op.ColId,
+		} else if op.Operation == db.FEATURE_DEL {
+			index, ok := b.indexes[op.ColId]
+			if !ok {
+				b.logger.Error("replay log db.FEATURE_ADD err")
+				return util.ErrIndexNotFound
 			}
-			req.Ids = append(req.Ids, op.FeatureId)
-			_, err := b.featureBatchDel(req)
-			if err != nil {
-				b.logger.Errorf("SyncOplos featureBatchDel error %v", err)
-			}
-			return util.ErrOplogNotEnd
+			index.del([]int64{op.SeqId})
 		}
 	} else if err != nil {
 		if err == mongo.ErrNoDocuments {
