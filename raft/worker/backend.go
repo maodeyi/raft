@@ -23,7 +23,7 @@ import (
 )
 
 type Worker interface {
-	subscribeOpLogs()
+	SubscribeOpLogs()
 	SyncOplogs()
 }
 
@@ -36,10 +36,10 @@ type backend struct {
 	indexes map[string]*memoryIndex // index id -> memory index
 
 	// cluster fields
-	raft    Raft             // raft
-	n       int              // worker number in cluster // TODO yore: 这个应该也只跟 sniffer 一起用, 以及通过接口热更新.
-	sniffer *sniffer.Sniffer // TODO yore: sniffer and raft 融合?
-
+	raft     Raft             // raft
+	n        int              // worker number in cluster // TODO yore: 这个应该也只跟 sniffer 一起用, 以及通过接口热更新.
+	sniffer  *sniffer.Sniffer // TODO yore: sniffer and raft 融合?
+	syncDone bool
 	// control fields
 	request chan *reqWrap
 	closeCh chan struct{}
@@ -61,8 +61,9 @@ func newBackend() (*backend, error) {
 		n:       3,                      // TODO yore: read from config file
 		sniffer: sniffer.NewSniffer(""), // TODO yore: impl
 
-		request: make(chan *reqWrap),
-		closeCh: make(chan struct{}),
+		request:  make(chan *reqWrap),
+		closeCh:  make(chan struct{}),
+		syncDone: false,
 	}
 	return b, nil
 }
@@ -102,7 +103,7 @@ func (b *backend) mainLoop() {
 	}
 }
 
-func (b *backend) subscribeOpLogs() {
+func (b *backend) SubscribeOpLogs() {
 	go func() {
 		for true {
 			select {
@@ -190,7 +191,7 @@ func (b *backend) recover() {
 	// yore: skip
 
 	// 3. replay oplog
-	// yore: move to main loop
+	// yore: move to main
 
 	// 4. recover index train(just send retrain request) (just run in master)
 	if b.isMaster() {
@@ -244,6 +245,9 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	if !b.isMaster() || !b.Healthy() {
 		return resp, util.ErrNotLeader
 	}
+	if b.isMaster() && !b.syncDone {
+		return resp, util.ErrOplogNotEnd
+	}
 
 	if req.GetUuid() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid index id")
@@ -284,6 +288,9 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 
 	if !b.isMaster() || !b.Healthy() {
 		return resp, util.ErrNotLeader
+	}
+	if b.isMaster() && !b.syncDone {
+		return resp, util.ErrOplogNotEnd
 	}
 	id := req.GetIndexUuid()
 	if _, ok := b.indexes[id]; !ok {
@@ -368,6 +375,9 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 	if !b.isMaster() || !b.Healthy() {
 		return resp, util.ErrNotLeader
 	}
+	if b.isMaster() && !b.syncDone {
+		return resp, util.ErrOplogNotEnd
+	}
 
 	indexID := req.GetColId()
 	items := req.GetItems()
@@ -428,6 +438,11 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.F
 	if !b.isMaster() || !b.Healthy() {
 		return resp, util.ErrNotLeader
 	}
+
+	if b.isMaster() && !b.syncDone {
+		return resp, util.ErrOplogNotEnd
+	}
+
 	indexID := req.GetColId()
 	ids := req.GetIds()
 
@@ -576,8 +591,8 @@ func (b *backend) RepalyOplogs() error {
 func (b *backend) SyncOplogs() {
 	for true {
 		select {
-		case syncDone := <-b.raft.SyncDoneNotify():
-			if syncDone {
+		case b.syncDone = <-b.raft.SyncDoneNotify():
+			if b.syncDone {
 				b.logger.Infof("trun to slave break sync")
 				return
 			}

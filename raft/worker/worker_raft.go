@@ -180,7 +180,7 @@ func (rf *WorkerRaft) Close() {
 }
 
 func (rf *WorkerRaft) LeaderElect() {
-	rf.backend.subscribeOpLogs()
+	rf.backend.SubscribeOpLogs()
 	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	go func() {
 		for {
@@ -530,7 +530,7 @@ func (rf *WorkerRaft) convertToFollower(term int32, voteFor string) {
 	rf.votedFor = voteFor
 	if rf.state == api.Role_MASTER {
 		rf.syncdone <- false
-		rf.backend.subscribeOpLogs()
+		rf.backend.SubscribeOpLogs()
 		rf.isMasterCh <- api.Role_SLAVE
 	}
 	rf.persist()

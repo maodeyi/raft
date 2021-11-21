@@ -119,6 +119,7 @@ func (b *backend) loadSnapshot() {
 			continue
 		}
 		b.indexes[indexID] = index
+		b.gen.seq = seq
 	}
 }
 
