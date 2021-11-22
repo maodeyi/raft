@@ -22,18 +22,18 @@ import (
 	"time"
 )
 
+var snapshotInterval = 5 * time.Minute
+var syncInterval = 1 * time.Second
+var subcribeInterval = 1 * time.Second
+
 type Worker interface {
-	SubscribeOpLogs()
-	SyncOplogs()
+	GetSeq() int64
 }
 
-var snapshotInterval = 5 * time.Minute
-
 type backend struct {
-	Worker
-	logger  *logrus.Entry
-	mu      sync.RWMutex            // lock for indexes
-	indexes map[string]*memoryIndex // index id -> memory index
+	logger     *logrus.Entry
+	syncDoneMu sync.Mutex
+	indexes    map[string]*memoryIndex // index id -> memory index
 
 	// cluster fields
 	raft     Raft             // raft
@@ -45,25 +45,22 @@ type backend struct {
 	closeCh chan struct{}
 
 	// master fields
-	gen            *generator // generate and save seq id
-	snapshotTicker *time.Ticker
-	MongoClient    *db.MongoClient
+	gen              *generator // generate and save seq id
+	snapshotTicker   *time.Ticker
+	syncOplogsTicker *time.Ticker
+	subOpLogsTicker  *time.Ticker
+	MongoClient      *db.MongoClient
 }
 
 func newBackend() (*backend, error) {
 	// 0. init the world.
 	b := &backend{
-		logger:  logrus.StandardLogger().WithField("component", "worker"),
-		mu:      sync.RWMutex{},
-		indexes: make(map[string]*memoryIndex, 128),
-
-		//raft:    Raft(nil),              // TODO yore: impl
-		n:       3,                      // TODO yore: read from config file
-		sniffer: sniffer.NewSniffer(""), // TODO yore: impl
-
-		request:  make(chan *reqWrap),
-		closeCh:  make(chan struct{}),
-		syncDone: false,
+		logger:     logrus.StandardLogger().WithField("component", "worker"),
+		syncDoneMu: sync.Mutex{},
+		indexes:    make(map[string]*memoryIndex, 128),
+		request:    make(chan *reqWrap),
+		closeCh:    make(chan struct{}),
+		syncDone:   false,
 	}
 	return b, nil
 }
@@ -101,97 +98,49 @@ func (b *backend) mainLoop() {
 			go b.snapshot()
 		case isMaster := <-b.raft.RoleNotify():
 			if isMaster == api.Role_MASTER {
+				b.syncDoneMu.Lock()
+				b.syncDone = false
+				b.syncDoneMu.Lock()
 				b.logger.Infof("turn to master begin snapshot")
 				b.snapshotTicker = time.NewTicker(snapshotInterval)
+				b.logger.Infof("turn to master stop subcribe and sync log")
+				if b.subOpLogsTicker != nil {
+					b.subOpLogsTicker.Stop()
+				}
+				b.subOpLogsTicker = &time.Ticker{C: make(<-chan time.Time)}
+				b.syncOplogsTicker = time.NewTicker(syncInterval)
 			} else if isMaster == api.Role_SLAVE {
+				b.syncDoneMu.Lock()
+				b.syncDone = false
+				b.syncDoneMu.Lock()
 				b.logger.Infof("turn to slave stop snapshot")
 				if b.snapshotTicker != nil {
 					b.snapshotTicker.Stop()
 				}
 				b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
+				b.subOpLogsTicker = time.NewTicker(subcribeInterval)
 			}
-		}
-	}
-}
-
-func (b *backend) SubscribeOpLogs() {
-	go func() {
-		for true {
-			select {
-			case isMaster := <-b.raft.RoleNotify():
-				if isMaster == api.Role_MASTER {
-					b.logger.Infof("turn to master stop subcribe and sync log")
-					return
+		case <-b.syncOplogsTicker.C:
+			err := b.RepalyOplogs()
+			if err == util.ErrOplogEof {
+				b.syncDoneMu.Lock()
+				b.syncDone = true
+				b.syncDoneMu.Unlock()
+				if b.subOpLogsTicker != nil {
+					b.subOpLogsTicker.Stop()
 				}
-			default:
+				b.subOpLogsTicker = &time.Ticker{C: make(<-chan time.Time)}
 			}
-			time.Sleep(200 * time.Millisecond)
+		case <-b.subOpLogsTicker.C:
 			_ = b.RepalyOplogs()
 		}
-	}()
+
+	}
 }
-
-//func (b *backend) Snapshot() {
-//	for true {
-//		select {
-//		case isMaster := <-b.raft.RoleNotify():
-//			if isMaster == api.Role_MASTER {
-//				b.logger.Infof("turn to master begin snapshot")
-//				b.snapshotTicker = time.NewTicker(snapshotInterval)
-//			} else if isMaster == api.Role_SLAVE {
-//				b.logger.Infof("turn to slave stop snapshot")
-//				if b.snapshotTicker != nil {
-//					b.snapshotTicker.Stop()
-//				}
-//				b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
-//			}
-//		default:
-//		}
-//	}
-//}
-
-//func (b *backend) handleRoleChange(old, new api.Role) {
-//	if old == new {
-//		return
-//	}
-//
-//	if new == api.Role_SLAVE {
-//		// 1. TODO yore: start oplog subscriber
-//
-//		// 2. stop snapshot
-//		if b.snapshotTicker != nil {
-//			b.snapshotTicker.Stop()
-//		}
-//		b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
-//
-//		// 3. TODO yore: stop index trainer
-//
-//	}
-//	if new == api.Role_MASTER {
-//		// 1. TODO yore: stop oplog subscriber
-//
-//		// 2. start snapshot
-//		b.snapshotTicker = time.NewTicker(snapshotInterval)
-//
-//		// 3. TODO yore: start index trainer
-//	}
-//}
 
 func (b *backend) isMaster() bool { return b.raft.IsMaster() }
 
 func (b *backend) Healthy() bool { return b.raft.Healthy() }
-
-func (b *backend) writePreflight() error {
-	if !b.isMaster() {
-		return util.ErrNotLeader
-	}
-	n := b.sniffer.GetWorkerNum()
-	if !(n > b.n/2) {
-		b.logger.Debugf("cannot connect to over half workers: %v of %v", n, b.n)
-		return util.ErrNoHalf
-	}
-	return nil
-}
 
 func (b *backend) recover() {
 	// 1. load snapshot
@@ -212,11 +161,16 @@ func (b *backend) recover() {
 
 func (b *backend) sendRequest(req interface{}) (interface{}, error) {
 	respCh := make(chan *respWrap, 1)
-	select {
-	case b.request <- &reqWrap{req: req, resp: respCh}:
+	b.syncDoneMu.Lock()
+	if b.syncDone {
+		select {
+		case b.request <- &reqWrap{req: req, resp: respCh}:
+		}
+		resp := <-respCh
+		return resp.resp, resp.err
 	}
-	resp := <-respCh
-	return resp.resp, resp.err
+	b.syncDoneMu.Unlock()
+	return nil, util.ErrSyncIng
 }
 
 func (b *backend) handleRequest(req *reqWrap) {
@@ -245,16 +199,13 @@ func (b *backend) handleRequest(req *reqWrap) {
 
 func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, error) {
 	resp := &api.IndexNewResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if !b.isMaster() || !b.Healthy() {
 		return resp, util.ErrNotLeader
 	}
+
 	if b.isMaster() && !b.syncDone {
 		return resp, util.ErrOplogNotEnd
 	}
@@ -275,9 +226,7 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	}
 
 	// 4. save index to index map
-	b.mu.Lock()
 	b.indexes[req.GetUuid()] = mi
-	b.mu.Unlock()
 
 	resp.Uuid = req.GetUuid()
 	resp.Status = sfd_db.Status_INITED
@@ -289,11 +238,7 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 
 func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, error) {
 	resp := &api.IndexDelResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if !b.isMaster() || !b.Healthy() {
@@ -314,21 +259,15 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 	}
 
 	// 2. delete item in index map and release index
-	b.mu.Lock()
 	b.indexes[id].release()
 	delete(b.indexes, id)
-	b.mu.Unlock()
 
 	return resp, nil
 }
 
 func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, error) {
 	resp := &api.IndexListResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if b.isMaster() && !b.Healthy() {
@@ -349,11 +288,7 @@ func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, er
 
 func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, error) {
 	resp := &api.IndexGetResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if b.isMaster() && !b.Healthy() {
@@ -375,11 +310,7 @@ func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, err
 
 func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
 	resp := &api.FeatureBatchAddResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if !b.isMaster() || !b.Healthy() {
@@ -438,11 +369,7 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 
 func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.FeatureBatchDeleteResponse, error) {
 	resp := &api.FeatureBatchDeleteResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if !b.isMaster() || !b.Healthy() {
@@ -495,11 +422,7 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.F
 
 func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
 	resp := &api.FeatureBatchSearchResponse{}
-	nodeInfo := b.raft.GetClusterInfo()
-	clusterInfo := &api.ClusterInfo{
-		NodeInfo: nodeInfo,
-		Role:     b.raft.GetRole(),
-	}
+	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
 	if b.isMaster() && !b.Healthy() {
@@ -552,16 +475,12 @@ func (b *backend) RepalyOplogs() error {
 	op, err := b.MongoClient.GetOplog(b.gen.GetSeq())
 	if op != nil {
 		if op.Operation == db.DB_DEL {
-			b.mu.Lock()
 			b.indexes[op.FeatureId].release()
 			delete(b.indexes, op.FeatureId)
-			b.mu.Unlock()
 			b.gen.NextSeq()
 		} else if op.Operation == db.DB_CREATE {
 			mi := newMemoryIndex(op.ColId, op.SeqId)
-			b.mu.Lock()
 			b.indexes[op.ColId] = mi
-			b.mu.Unlock()
 			b.gen.NextSeq()
 		} else if op.Operation == db.FEATURE_ADD {
 			index, ok := b.indexes[op.ColId]
@@ -598,21 +517,8 @@ func (b *backend) RepalyOplogs() error {
 	return err
 }
 
-func (b *backend) SyncOplogs() {
-	for true {
-		select {
-		case b.syncDone = <-b.raft.SyncDoneNotify():
-			if b.syncDone {
-				b.logger.Infof("trun to slave break sync")
-				return
-			}
-		default:
-		}
-		err := b.RepalyOplogs()
-		if err == util.ErrOplogEof {
-			return
-		}
-	}
+func (b *backend) GetSeq() int64 {
+	return b.gen.GetSeq()
 }
 
 func (b *backend) stop() {

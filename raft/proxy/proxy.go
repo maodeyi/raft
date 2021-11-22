@@ -44,6 +44,7 @@ type Proxy struct {
 //todo
 func NewProxy() *Proxy {
 	rf := &Proxy{
+		//todo
 		sniffer: sniffer.NewSniffer("//dns.***"),
 		logger:  logrus.StandardLogger().WithField("component", "Proxy"),
 		rrIndex: -1,
@@ -171,6 +172,7 @@ func (s *Proxy) Init() error {
 	//todo get mongo workernumer
 	s.sniffer.Start()
 	s.clusterInfo = make(map[string]*Node)
+
 	go s.subWokersStauts()
 
 	s.logger.Infof("waiting for %d worker start...", s.workerNum/2+1)
@@ -425,6 +427,7 @@ func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*
 				continue
 			}
 		} else {
+			//todo try again
 			return resp, err
 		}
 	}

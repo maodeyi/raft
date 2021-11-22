@@ -12,4 +12,5 @@ var (
 	ErrIndexNotFound = status.Error(codes.InvalidArgument, "index not found")
 	ErrOplogNotEnd   = status.Error(codes.InvalidArgument, "oplogs not end")
 	ErrOplogEof      = status.Error(codes.InvalidArgument, "oplogs eof")
+	ErrSyncIng       = status.Error(codes.InvalidArgument, "oplogs is syncing")
 )

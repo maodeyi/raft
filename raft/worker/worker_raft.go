@@ -1,9 +1,7 @@
 package worker
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"github.com/maodeyi/raft/raft/sniffer"
 	"github.com/maodeyi/raft/raft/util"
 	"github.com/sirupsen/logrus"
@@ -17,14 +15,12 @@ import (
 )
 
 type Raft interface {
-	GetRole() api.Role
 	IsMaster() bool
 	Healthy() bool
 	LeaderElect()
 	RoleNotify() <-chan api.Role
-	SyncDoneNotify() <-chan bool
 	NotifyStart() <-chan bool
-	GetClusterInfo() []*api.NodeInfo
+	GetClusterInfo() *api.ClusterInfo
 }
 
 type HeartBead struct {
@@ -44,17 +40,15 @@ type WorkerRaft struct {
 	peers       map[string]api.StaticFeatureDBWorkerServiceClient // RPC end points of all peers
 	clusterInfo []*api.NodeInfo
 	sniffer     *sniffer.Sniffer
-	backend     Worker
+	worker      Worker
 	logger      *logrus.Entry
 	me          string // this peer's index into peers[]
-	syncdone    chan bool
-	closeCh     chan struct{}
+
+	closeCh chan struct{}
 
 	workerNum   int32
 	currentTerm int32
 	votedFor    string
-
-	seqId int32
 
 	state           api.Role
 	electionTimeout int
@@ -147,20 +141,19 @@ func (rf *WorkerRaft) subWokersStauts() {
 }
 
 //todo get workernumber from mongo
-func (rf *WorkerRaft) Init(backend *backend) error {
+func (rf *WorkerRaft) Init(worker Worker) error {
 	rf.peers = make(map[string]api.StaticFeatureDBWorkerServiceClient)
+	//todo
+	rf.sniffer = sniffer.NewSniffer("dns:///")
 	go rf.subWokersStauts()
 
-	//todo get self id ip
 	rf.me = me
-	rf.backend = backend
+	rf.worker = worker
 	rf.currentTerm = 0
 	rf.votedFor = ""
-	rf.seqId = 0
 	rf.logger = logrus.StandardLogger().WithField("component", "worker_raft")
 
 	rf.state = api.Role_SLAVE
-	rf.syncdone = make(chan bool)
 	rf.closeCh = make(chan struct{})
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
 	rf.grantVoteCh = make(chan bool)
@@ -178,7 +171,7 @@ func (rf *WorkerRaft) Close() {
 }
 
 func (rf *WorkerRaft) LeaderElect() {
-	rf.backend.SubscribeOpLogs()
+	rf.isMasterCh <- api.Role_SLAVE
 	rf.timer = time.NewTimer(time.Duration(rf.electionTimeout) * time.Millisecond)
 	go func() {
 		for {
@@ -253,31 +246,6 @@ func (rf *WorkerRaft) GetState() (int32, bool) {
 	return term, isleader
 }
 
-func (rf *WorkerRaft) persist() {
-	//w := new(bytes.Buffer)
-	//e := gob.NewEncoder(w)
-	//e.Encode(rf.currentTerm)
-	//e.Encode(rf.votedFor)
-	////e.Encode(rf.log)
-	//data := w.Bytes()
-	//rf.persister.SaveRaftState(data)
-}
-
-func (rf *WorkerRaft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
-	d.Decode(&rf.currentTerm)
-	d.Decode(&rf.votedFor)
-	//d.Decode(&rf.log)
-	//rf.seq_id = int32(len(rf.log))
-	if data == nil || len(data) < 1 {
-		return
-	}
-}
-
 type RequestVoteArgs struct {
 	Term        int
 	CandidateId int
@@ -293,7 +261,7 @@ func (rf *WorkerRaft) RequestVoteChannel(args *api.RequestVoteRequest) *api.Requ
 	reply := api.RequestVoteResponse{}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Infof("Server %d: got RequestVote from candidate %d, args: %+v, current currentTerm: %d, current seq_id: %v\n", rf.me, args.CandidateId, args, rf.currentTerm, rf.seqId)
+	rf.logger.Infof("Server %d: got RequestVote from candidate %d, args: %+v, current currentTerm: %d\n", rf.me, args.CandidateId, args, rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -304,15 +272,14 @@ func (rf *WorkerRaft) RequestVoteChannel(args *api.RequestVoteRequest) *api.Requ
 				reply.VoteGranted = false
 			} else {
 				//todo   any time, we will get a server with max seq_id
-				if args.SeqId <= rf.seqId {
+				if args.SeqId <= int32(rf.worker.GetSeq()) {
 					reply.Term = rf.currentTerm
 					reply.VoteGranted = false
 				} else {
-					rf.logger.Infof("Server %d: grant vote to candidate %d  args.seqid %d rf.seq_id %d \n", rf.me, args.CandidateId, args.SeqId, rf.seqId)
+					rf.logger.Infof("Server %d: grant vote to candidate %d  args.seqid %d \n", rf.me, args.CandidateId, args.SeqId)
 					reply.Term = rf.currentTerm
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
-					rf.persist()
 					rf.setGrantVoteCh()
 				}
 			}
@@ -322,41 +289,12 @@ func (rf *WorkerRaft) RequestVoteChannel(args *api.RequestVoteRequest) *api.Requ
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
-			rf.persist()
 			rf.setGrantVoteCh()
 		}
 	}
-	rf.logger.Infof("======= server %d got RequestVote from candidate %d, args: %+v, current seq_id: %v, reply: %+v =======\n", rf.me, args.CandidateId, args, rf.seqId, reply)
+	rf.logger.Infof("======= server %d got RequestVote from candidate %d, args: %+v, reply: %+v =======\n", rf.me, args.CandidateId, args, reply)
 	return &reply
 }
-
-//func (rf *RaftHTTPService) Start(command interface{}) (int32, int32, bool) {
-//	rf.mu.Lock()
-//	term := rf.currentTerm
-//	isLeader := (rf.state == api.Role_MASTER)
-//
-//	if isLeader {
-//		DPrintf("Leader %d: got a new Start task, command: %v\n", rf.me, command)
-//		if rf.syncdone == false {
-//			rf.syncOpLogs()
-//			rf.syncdone = true
-//			DPrintf("leader is syncing")
-//		}
-//		rf.seq_id++
-//		//rf.log = append(rf.log, Entry{rf.currentTerm, command})
-//		err := rf.mongoclient.InsertOpLog()
-//		if err != nil {
-//			DPrintf("mongo InsertOpLog error %v", err)
-//		}
-//		rf.persist()
-//	}
-//	rf.mu.Unlock()
-//	//err := rf.mongoclient.InsertOpLog()
-//	//if err != nil {
-//	//	DPrintf("mongo InsertOpLog error %v", err)
-//	//}
-//	return rf.seq_id, term, isLeader
-//}
 
 func (rf *WorkerRaft) Kill() {
 	//atomic.StoreInt32(&rf.dead, 1)
@@ -367,29 +305,6 @@ func GenerateElectionTimeout(min, max int) int {
 	randNum := rad.Intn(max-min) + min
 	return randNum
 }
-
-//func (rf *WorkerRaft) subscribeOpLogs() {
-//	go func() {
-//		for true {
-//			select {
-//			//when raft change into follower from master receive from subscribeOplogsCh
-//			case isMaster := <-rf.isMasterCh:
-//				if isMaster == api.Role_MASTER {
-//					rf.logger.Infof("turn to master stop subcribe and sync log")
-//					break
-//				}
-//			default:
-//			}
-//			time.Sleep(300 * time.Millisecond)
-//			addseq_id, _ := rf.GetOpLogs()
-//			if addseq_id == 1 {
-//				rf.mu.Lock()
-//				rf.seq_id++
-//				rf.mu.Unlock()
-//			}
-//		}
-//	}()
-//}
 
 func (rf *WorkerRaft) startHeartBeat() {
 	for {
@@ -459,7 +374,7 @@ func (rf *WorkerRaft) startRequestVote() {
 	args := api.RequestVoteRequest{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
-		SeqId:       rf.seqId,
+		SeqId:       int32(rf.worker.GetSeq()),
 	}
 
 	nLeader := 0
@@ -492,9 +407,6 @@ func (rf *WorkerRaft) startRequestVote() {
 						rf.isMasterCh <- api.Role_MASTER
 						rf.convertToLeader()
 						rf.setLeaderCh()
-						go func() {
-							rf.backend.SyncOplogs()
-						}()
 					}
 				}
 				rf.mu.Unlock()
@@ -523,15 +435,12 @@ func (rf *WorkerRaft) sendRequestVote(client api.StaticFeatureDBWorkerServiceCli
 
 func (rf *WorkerRaft) convertToFollower(term int32, voteFor string) {
 	rf.currentTerm = term
+	if rf.state == api.Role_MASTER {
+		rf.isMasterCh <- api.Role_SLAVE
+	}
 	rf.state = api.Role_SLAVE
 	rf.totalVotes = 0
 	rf.votedFor = voteFor
-	if rf.state == api.Role_MASTER {
-		rf.syncdone <- false
-		rf.backend.SubscribeOpLogs()
-		rf.isMasterCh <- api.Role_SLAVE
-	}
-	rf.persist()
 }
 
 func (rf *WorkerRaft) HeartBeatChannel(args *api.HeartBeadRequest) *api.HeartBeadResponse {
@@ -568,7 +477,6 @@ func (rf *WorkerRaft) convertToCandidate() {
 	rf.totalVotes = 1
 	rf.electionTimeout = GenerateElectionTimeout(200, 400)
 	rf.timer.Reset(time.Duration(rf.electionTimeout) * time.Millisecond)
-	rf.persist()
 }
 
 func (rf *WorkerRaft) convertToLeader() {
@@ -619,17 +527,6 @@ type NodeStatus struct {
 	healthy bool
 }
 
-func (rf *WorkerRaft) GetNodeStatus() *NodeStatus {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	healthy, _ := util.CheckLegalMaster(rf.clusterInfo)
-	nodeStatus := &NodeStatus{
-		role:    rf.state,
-		healthy: healthy,
-	}
-	return nodeStatus
-}
-
 func (rf *WorkerRaft) IsMaster() bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -644,10 +541,6 @@ func (rf *WorkerRaft) RoleNotify() <-chan api.Role {
 	return rf.isMasterCh
 }
 
-func (rf *WorkerRaft) SyncDoneNotify() <-chan bool {
-	return rf.syncdone
-}
-
 func (rf *WorkerRaft) NotifyStart() <-chan bool {
 	return rf.startCh
 }
@@ -659,14 +552,11 @@ func (rf *WorkerRaft) Healthy() bool {
 	return ok
 }
 
-func (rf *WorkerRaft) GetClusterInfo() []*api.NodeInfo {
+func (rf *WorkerRaft) GetClusterInfo() *api.ClusterInfo {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.clusterInfo
-}
-
-func (rf *WorkerRaft) GetRole() api.Role {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.state
+	return &api.ClusterInfo{
+		NodeInfo: rf.clusterInfo,
+		Role:     rf.state,
+	}
 }
