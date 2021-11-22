@@ -16,8 +16,6 @@ import (
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 )
 
-//todo change cluster node info
-
 type Raft interface {
 	GetRole() api.Role
 	IsMaster() bool

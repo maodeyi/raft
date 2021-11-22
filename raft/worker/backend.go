@@ -99,6 +99,17 @@ func (b *backend) mainLoop() {
 			// do snapshot in other thread
 			// TODO yore: any data race?
 			go b.snapshot()
+		case isMaster := <-b.raft.RoleNotify():
+			if isMaster == api.Role_MASTER {
+				b.logger.Infof("turn to master begin snapshot")
+				b.snapshotTicker = time.NewTicker(snapshotInterval)
+			} else if isMaster == api.Role_SLAVE {
+				b.logger.Infof("turn to slave stop snapshot")
+				if b.snapshotTicker != nil {
+					b.snapshotTicker.Stop()
+				}
+				b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
+			}
 		}
 	}
 }
@@ -120,57 +131,56 @@ func (b *backend) SubscribeOpLogs() {
 	}()
 }
 
-func (b *backend) Snapshot() {
-	for true {
-		select {
-		case isMaster := <-b.raft.RoleNotify():
-			if isMaster == api.Role_MASTER {
-				b.logger.Infof("turn to master begin snapshot")
-				b.snapshotTicker = time.NewTicker(snapshotInterval)
-			} else if isMaster == api.Role_SLAVE {
-				b.logger.Infof("turn to slave stop snapshot")
-				if b.snapshotTicker != nil {
-					b.snapshotTicker.Stop()
-				}
-				b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
-			}
-		default:
-		}
-	}
-}
+//func (b *backend) Snapshot() {
+//	for true {
+//		select {
+//		case isMaster := <-b.raft.RoleNotify():
+//			if isMaster == api.Role_MASTER {
+//				b.logger.Infof("turn to master begin snapshot")
+//				b.snapshotTicker = time.NewTicker(snapshotInterval)
+//			} else if isMaster == api.Role_SLAVE {
+//				b.logger.Infof("turn to slave stop snapshot")
+//				if b.snapshotTicker != nil {
+//					b.snapshotTicker.Stop()
+//				}
+//				b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
+//			}
+//		default:
+//		}
+//	}
+//}
 
-func (b *backend) handleRoleChange(old, new api.Role) {
-	if old == new {
-		return
-	}
-
-	if new == api.Role_SLAVE {
-		// 1. TODO yore: start oplog subscriber
-
-		// 2. stop snapshot
-		if b.snapshotTicker != nil {
-			b.snapshotTicker.Stop()
-		}
-		b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
-
-		// 3. TODO yore: stop index trainer
-
-	}
-	if new == api.Role_MASTER {
-		// 1. TODO yore: stop oplog subscriber
-
-		// 2. start snapshot
-		b.snapshotTicker = time.NewTicker(snapshotInterval)
-
-		// 3. TODO yore: start index trainer
-	}
-}
+//func (b *backend) handleRoleChange(old, new api.Role) {
+//	if old == new {
+//		return
+//	}
+//
+//	if new == api.Role_SLAVE {
+//		// 1. TODO yore: start oplog subscriber
+//
+//		// 2. stop snapshot
+//		if b.snapshotTicker != nil {
+//			b.snapshotTicker.Stop()
+//		}
+//		b.snapshotTicker = &time.Ticker{C: make(<-chan time.Time)}
+//
+//		// 3. TODO yore: stop index trainer
+//
+//	}
+//	if new == api.Role_MASTER {
+//		// 1. TODO yore: stop oplog subscriber
+//
+//		// 2. start snapshot
+//		b.snapshotTicker = time.NewTicker(snapshotInterval)
+//
+//		// 3. TODO yore: start index trainer
+//	}
+//}
 
 func (b *backend) isMaster() bool { return b.raft.IsMaster() }
 
 func (b *backend) Healthy() bool { return b.raft.Healthy() }
 
-// TODO yore: change to use raft instead of sniffer.
 func (b *backend) writePreflight() error {
 	if !b.isMaster() {
 		return util.ErrNotLeader

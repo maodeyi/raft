@@ -52,48 +52,6 @@ func (s *WorkerWarpper) HeartBead(ctx context.Context, in *api.HeartBeadRequest)
 	return s.workerRaft.HeartBeatChannel(in), nil
 }
 
-//
-//func (s *WorkerWarpper) Write(ctx context.Context, in *api.WriteRequest) (*api.WriteResponse, error) {
-//	resp := &api.WriteResponse{
-//		ClusterInfo: &api.ClusterInfo{},
-//	}
-//	s.workerRaft.mu.Lock()
-//	defer s.workerRaft.mu.Unlock()
-//
-//	if s.workerRaft.state != api.Role_MASTER {
-//		return nil, errors.New("not master")
-//	}
-//	for _, v := range s.workerRaft.clusterInfo {
-//		nodeInfo := &api.NodeInfo{
-//			Id:         v.Id,
-//			Ip:         v.Ip,
-//			Port:       v.Port,
-//			LastStatus: v.LastStatus,
-//			Role:       v.Role,
-//		}
-//		resp.ClusterInfo.NodeInfo = append(resp.ClusterInfo.NodeInfo, nodeInfo)
-//	}
-//
-//	resp.Role = s.workerRaft.state
-//
-//	//todo mongo do not need lock
-//	if !s.workerRaft.syncdone {
-//		return resp, errors.New("sync oplog")
-//	}
-//	err := s.b.MongoClient.InsertOpLog()
-//	if err != nil {
-//		return resp, err
-//	}
-//	s.workerRaft.seq_id++
-//
-//	return resp, nil
-//}
-//
-//func (s *WorkerWarpper) Read(ctx context.Context, in *api.ReadRequest) (*api.ReadResponse, error) {
-//	resp := &api.ReadResponse{ClusterInfo: &api.ClusterInfo{}}
-//	return resp, nil
-//}
-
 func (s *WorkerWarpper) GetClusterInfo(ctx context.Context, in *api.GetClusterInfoRequest) (*api.GetClusterInfoResponse, error) {
 	resp := &api.GetClusterInfoResponse{}
 	s.workerRaft.mu.Lock()
