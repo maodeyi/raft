@@ -42,23 +42,24 @@ type WorkerRaft struct {
 	sniffer     *sniffer.Sniffer
 	worker      Worker
 	logger      *logrus.Entry
-	me          string // this peer's index into peers[]
 
-	closeCh chan struct{}
+	me       string // this peer's index into peers[]
+	votedFor string
 
 	workerNum   int32
 	currentTerm int32
-	votedFor    string
+	totalVotes  int
 
 	state           api.Role
 	electionTimeout int
 	grantVoteCh     chan bool
 	heartBeatCh     chan bool
 	isMasterCh      chan api.Role
+	closeCh         chan struct{}
 	leaderCh        chan bool
 	startCh         chan bool
-	totalVotes      int
-	timer           *time.Timer
+
+	timer *time.Timer
 }
 
 func (rf *WorkerRaft) addPeer(nodeInfo *api.NodeInfo) error {
