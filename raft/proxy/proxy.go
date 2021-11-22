@@ -41,10 +41,8 @@ type Proxy struct {
 	logger      *logrus.Entry
 }
 
-//todo
 func NewProxy() *Proxy {
 	rf := &Proxy{
-		//todo
 		sniffer: sniffer.NewSniffer("//dns.***"),
 		logger:  logrus.StandardLogger().WithField("component", "Proxy"),
 		rrIndex: -1,
@@ -69,10 +67,7 @@ func (s *Proxy) destoryWorkNode(node *Node) error {
 func (s *Proxy) addWorkNode(nodeInfo *api.NodeInfo) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())
-	//
-	//s.mu.Lock()
-	//defer s.mu.Unlock()
+	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())()
 	node := &Node{
 		NodeInfo: &api.NodeInfo{
 			Id:   nodeInfo.Id,
@@ -109,18 +104,6 @@ func (s *Proxy) getMaster() api.StaticFeatureDBWorkerServiceClient {
 func (s *Proxy) subWokersStauts() {
 	addrs, ch := s.sniffer.Subscribe("proxy")
 	for k, v := range addrs {
-		s.mu.Lock()
-		if len(s.clusterInfo) > int(s.workerNum/2) {
-			s.startCh <- true
-		}
-
-		if len(s.clusterInfo) == int(s.workerNum) {
-			s.mu.Unlock()
-			break
-		}
-
-		s.mu.Unlock()
-
 		nodeInfo, err := util.BuildNodeInfo(k, v)
 		if err != nil {
 			s.logger.Errorf("BuildNodeInfo error %s %s %v", k, v, err)
@@ -132,7 +115,11 @@ func (s *Proxy) subWokersStauts() {
 		if err != nil {
 			s.logger.Errorf("proxy inti worker peer error %v", err)
 		}
+	}
 
+	if len(addrs) > 1 {
+		s.startCh <- true
+		return
 	}
 
 	for true {
@@ -142,27 +129,17 @@ func (s *Proxy) subWokersStauts() {
 		case msg := <-ch:
 			if msg.Begin {
 				s.mu.Lock()
-				defer s.mu.Unlock()
-				_, ok := s.clusterInfo[msg.WorkerID]
-				if !ok && len(s.clusterInfo) < int(s.workerNum) {
-					nodeInfo, err := util.BuildNodeInfo(msg.WorkerID, msg.Address)
-					if err != nil {
-						s.logger.Errorf("BuildNodeInfo error %s %s %v", msg.WorkerID, msg.Address, err)
-					}
-					err = s.addWorkNode(nodeInfo)
-					if err != nil {
-						s.logger.Errorf("proxy inti worker peer error %v", err)
-					}
-					if len(s.clusterInfo) == int(s.workerNum/2+1) {
-						select {
-						case s.startCh <- true:
-						default:
-						}
-					}
-					if len(s.clusterInfo) == int(s.workerNum) {
-						return
-					}
+				nodeInfo, err := util.BuildNodeInfo(msg.WorkerID, msg.Address)
+				if err != nil {
+					s.logger.Errorf("BuildNodeInfo error %s %s %v", msg.WorkerID, msg.Address, err)
 				}
+				err = s.addWorkNode(nodeInfo)
+				if err != nil {
+					s.logger.Errorf("proxy inti worker peer error %v", err)
+				}
+				s.mu.Unlock()
+				s.startCh <- true
+				return
 			}
 		}
 	}
@@ -373,29 +350,52 @@ MASTER:
 		if err != nil {
 			s.logger.Errorf("index %s Client IndexNew error %v", masterIndex, err)
 		}
-		if clusterInfo != nil {
-			ok, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
-			if ok {
-				s.checkClusterInfo(clusterInfo.NodeInfo)
-				if clusterInfo.Role == api.Role_MASTER {
-					return resp, err
-				} else {
-					nodes.nodesVisted[masterIndex] = true
-					masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
-					goto MASTER
-				}
-			} else {
-				for _, v := range unhNodes {
-					nodes.nodesVisted[v] = true
-				}
-				masterIndex = s.nextUnvisted(nodes)
-				goto MASTER
+		nodes.nodesVisted[masterIndex] = true
+
+		if err == util.ErrNoLeader {
+			masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
+			goto MASTER
+		} else if err == util.ErrNoHalf {
+			_, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
+			for _, v := range unhNodes {
+				nodes.nodesVisted[v] = true
 			}
-		} else {
+			masterIndex = s.nextUnvisted(nodes)
+			goto MASTER
+		} else if clusterInfo == nil {
 			nodes.nodesVisted[masterIndex] = true
 			masterIndex = s.nextUnvisted(nodes)
 			goto MASTER
+		} else if clusterInfo.Role == api.Role_MASTER {
+			s.checkClusterInfo(clusterInfo.NodeInfo)
+			return resp, err
+		} else {
+
 		}
+
+		//if clusterInfo != nil {
+		//	ok, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
+		//	if ok {
+		//		s.checkClusterInfo(clusterInfo.NodeInfo)
+		//		if clusterInfo.Role == api.Role_MASTER {
+		//			return resp, err
+		//		} else {
+		//			nodes.nodesVisted[masterIndex] = true
+		//			masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
+		//			goto MASTER
+		//		}
+		//	} else {
+		//		for _, v := range unhNodes {
+		//			nodes.nodesVisted[v] = true
+		//		}
+		//		masterIndex = s.nextUnvisted(nodes)
+		//		goto MASTER
+		//	}
+		//} else {
+		//	nodes.nodesVisted[masterIndex] = true
+		//	masterIndex = s.nextUnvisted(nodes)
+		//	goto MASTER
+		//}
 	} else {
 		return nil, util.ErrNoLeader
 	}
@@ -419,13 +419,12 @@ func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*
 			s.logger.Errorf("IndexList error", err)
 		}
 		if resp != nil && resp.ClusterInfo != nil {
-			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
-			if ok {
-				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
-				return resp, err
-			} else {
+			if err == util.ErrNoHalf {
 				continue
 			}
+			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+			return resp, err
+
 		} else {
 			//todo try again
 			return resp, err
@@ -446,13 +445,11 @@ func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*ap
 			s.logger.Errorf("IndexGet error", err)
 		}
 		if resp != nil && resp.ClusterInfo != nil {
-			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
-			if ok {
-				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
-				return resp, err
-			} else {
+			if err == util.ErrNoHalf {
 				continue
 			}
+			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+			return resp, err
 		} else {
 			return resp, err
 		}
@@ -478,13 +475,11 @@ func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatch
 			s.logger.Errorf("FeatureBatchSearch error", err)
 		}
 		if resp != nil && resp.ClusterInfo != nil {
-			ok, _ := util.CheckLegalMaster(resp.ClusterInfo.NodeInfo)
-			if ok {
-				s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
-				return resp, err
-			} else {
+			if err == util.ErrNoHalf {
 				continue
 			}
+			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
+			return resp, err
 		} else {
 			return resp, err
 		}

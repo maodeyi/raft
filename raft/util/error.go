@@ -6,7 +6,8 @@ import (
 )
 
 var (
-	ErrNotLeader     = status.Error(codes.Aborted, "node is not leader")
+	ErrNotLeader = status.Error(codes.Aborted, "node is not leader")
+	//ErrUnHealthyLeader     = status.Error(codes.Aborted, "node is leader but not health")
 	ErrNoLeader      = status.Error(codes.Aborted, "no leader")
 	ErrNoHalf        = status.Error(codes.Aborted, "cannot connect to over half followers")
 	ErrIndexNotFound = status.Error(codes.InvalidArgument, "index not found")

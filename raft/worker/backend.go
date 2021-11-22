@@ -202,13 +202,17 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() || !b.Healthy() {
+	if !b.isMaster() {
 		return resp, util.ErrNotLeader
 	}
 
-	if b.isMaster() && !b.syncDone {
-		return resp, util.ErrOplogNotEnd
+	if !b.Healthy() {
+		return resp, util.ErrNoHalf
 	}
+
+	//if b.isMaster() && !b.syncDone {
+	//	return resp, util.ErrSyncIng
+	//}
 
 	if req.GetUuid() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid index id")
@@ -241,12 +245,18 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() || !b.Healthy() {
+	if !b.isMaster() {
 		return resp, util.ErrNotLeader
 	}
-	if b.isMaster() && !b.syncDone {
-		return resp, util.ErrOplogNotEnd
+
+	if !b.Healthy() {
+		return resp, util.ErrNoHalf
 	}
+
+	//if b.isMaster() && !b.syncDone {
+	//	return resp, util.ErrSyncIng
+	//}
+
 	id := req.GetIndexUuid()
 	if _, ok := b.indexes[id]; !ok {
 		return nil, util.ErrIndexNotFound
@@ -271,7 +281,7 @@ func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, er
 	resp.ClusterInfo = clusterInfo
 
 	if b.isMaster() && !b.Healthy() {
-		return resp, util.ErrNotLeader
+		return resp, util.ErrNoHalf
 	}
 
 	resp.Indexes = make([]*sfd_db.IndexInfo, 0, len(b.indexes))
@@ -292,12 +302,12 @@ func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, err
 	resp.ClusterInfo = clusterInfo
 
 	if b.isMaster() && !b.Healthy() {
-		return resp, util.ErrNotLeader
+		return resp, util.ErrNoHalf
 	}
 
 	id := req.GetIndexUuid()
 	if index, ok := b.indexes[id]; !ok {
-		return nil, util.ErrIndexNotFound
+		return resp, util.ErrIndexNotFound
 	} else {
 		resp.Index = &sfd_db.IndexInfo{
 			Uuid:      id,
@@ -313,12 +323,17 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() || !b.Healthy() {
+	if !b.isMaster() {
 		return resp, util.ErrNotLeader
 	}
-	if b.isMaster() && !b.syncDone {
-		return resp, util.ErrOplogNotEnd
+
+	if !b.Healthy() {
+		return resp, util.ErrNoHalf
 	}
+	//
+	//if b.isMaster() && !b.syncDone {
+	//	return resp, util.ErrSyncIng
+	//}
 
 	indexID := req.GetColId()
 	items := req.GetItems()
@@ -372,13 +387,17 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.F
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() || !b.Healthy() {
+	if !b.isMaster() {
 		return resp, util.ErrNotLeader
 	}
 
-	if b.isMaster() && !b.syncDone {
-		return resp, util.ErrOplogNotEnd
+	if !b.Healthy() {
+		return resp, util.ErrNoHalf
 	}
+
+	//if b.isMaster() && !b.syncDone {
+	//	return resp, util.ErrSyncIng
+	//}
 
 	indexID := req.GetColId()
 	ids := req.GetIds()
@@ -425,9 +444,18 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*api.Fea
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if b.isMaster() && !b.Healthy() {
+	if !b.isMaster() {
 		return resp, util.ErrNotLeader
 	}
+
+	if !b.Healthy() {
+		return resp, util.ErrNoHalf
+	}
+
+	//if b.isMaster() && !b.syncDone {
+	//	return resp, util.ErrSyncIng
+	//}
+
 	indexID := req.GetColId()
 	items := req.GetFeatures()
 

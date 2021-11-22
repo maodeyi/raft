@@ -130,6 +130,7 @@ func (rf *WorkerRaft) subWokersStauts() {
 					}
 					if len(rf.peers) == int(rf.workerNum/2+1) {
 						select {
+						//todo
 						case rf.startCh <- true:
 						default:
 						}
@@ -146,6 +147,7 @@ func (rf *WorkerRaft) Init(worker Worker) error {
 	rf.peers = make(map[string]api.StaticFeatureDBWorkerServiceClient)
 	//todo
 	rf.sniffer = sniffer.NewSniffer("dns:///")
+	rf.sniffer.Start()
 	go rf.subWokersStauts()
 
 	rf.me = me
