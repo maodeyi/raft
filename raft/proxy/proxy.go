@@ -67,7 +67,7 @@ func (s *Proxy) destoryWorkNode(node *Node) error {
 func (s *Proxy) addWorkNode(nodeInfo *api.NodeInfo) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())()
+	conn, err := grpc.DialContext(ctx, nodeInfo.Ip+":"+nodeInfo.Port, grpc.WithInsecure())
 	node := &Node{
 		NodeInfo: &api.NodeInfo{
 			Id:   nodeInfo.Id,
