@@ -73,9 +73,10 @@ func (b *backend) Run() {
 	// 1. recover
 	b.recover()
 
-	select {
-	case <-b.raft.NotifyStart():
-	}
+	//todo wether check nodes > 1/2 config workernum
+	//select {
+	//case <-b.raft.NotifyStart():
+	//}
 
 	// 2. start leader electing
 	b.raft.LeaderElect() // just start cluster
@@ -138,9 +139,13 @@ func (b *backend) mainLoop() {
 	}
 }
 
-func (b *backend) isMaster() bool { return b.raft.IsMaster() }
+//race condition if use raft check method
+func (b *backend) Healthy(clusterInfo []*api.NodeInfo) bool {
+	ok, _ := util.CheckLegalMaster(clusterInfo)
+	return ok
+}
 
-func (b *backend) Healthy() bool { return b.raft.Healthy() }
+func (b *backend) isMaster(role api.Role) bool { return role == api.Role_MASTER }
 
 func (b *backend) recover() {
 	// 1. load snapshot
@@ -153,10 +158,10 @@ func (b *backend) recover() {
 	// yore: move to main
 
 	// 4. recover index train(just send retrain request) (just run in master)
-	if b.isMaster() {
-		// send requests
-		// yore: move to slave to master
-	}
+	//if b.isMaster() {
+	//	// send requests
+	//	// yore: move to slave to master
+	//}
 }
 
 func (b *backend) sendRequest(req interface{}) (interface{}, error) {
@@ -202,11 +207,11 @@ func (b *backend) indexNew(req *api.IndexNewRequest) (*api.IndexNewResponse, err
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() {
+	if !b.isMaster(clusterInfo.Role) {
 		return resp, util.ErrNotLeader
 	}
 
-	if !b.Healthy() {
+	if !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 
@@ -245,11 +250,11 @@ func (b *backend) indexDelete(req *api.IndexDelRequest) (*api.IndexDelResponse, 
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() {
+	if !b.isMaster(clusterInfo.Role) {
 		return resp, util.ErrNotLeader
 	}
 
-	if !b.Healthy() {
+	if !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 
@@ -280,7 +285,7 @@ func (b *backend) indexList(_ *api.IndexListRequest) (*api.IndexListResponse, er
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if b.isMaster() && !b.Healthy() {
+	if b.isMaster(clusterInfo.Role) && !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 
@@ -301,7 +306,7 @@ func (b *backend) indexGet(req *api.IndexGetRequest) (*api.IndexGetResponse, err
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if b.isMaster() && !b.Healthy() {
+	if b.isMaster(clusterInfo.Role) && !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 
@@ -323,11 +328,11 @@ func (b *backend) featureBatchAdd(req *sfd_db.FeatureBatchAddRequest) (*api.Feat
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() {
+	if !b.isMaster(clusterInfo.Role) {
 		return resp, util.ErrNotLeader
 	}
 
-	if !b.Healthy() {
+	if !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 	//
@@ -387,11 +392,11 @@ func (b *backend) featureBatchDel(req *sfd_db.FeatureBatchDeleteRequest) (*api.F
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() {
+	if !b.isMaster(clusterInfo.Role) {
 		return resp, util.ErrNotLeader
 	}
 
-	if !b.Healthy() {
+	if !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 
@@ -444,11 +449,11 @@ func (b *backend) featureSearch(req *sfd_db.FeatureBatchSearchRequest) (*api.Fea
 	clusterInfo := b.raft.GetClusterInfo()
 	resp.ClusterInfo = clusterInfo
 
-	if !b.isMaster() {
+	if !b.isMaster(clusterInfo.Role) {
 		return resp, util.ErrNotLeader
 	}
 
-	if !b.Healthy() {
+	if !b.Healthy(clusterInfo.NodeInfo) {
 		return resp, util.ErrNoHalf
 	}
 

@@ -271,7 +271,7 @@ func (s *Proxy) getNodesStatus() (NodesStatus, string) {
 
 	var id string
 
-	for k, _ := range nodes.clusterInfo {
+	for k := range nodes.clusterInfo {
 		nodes.nodesVisted[k] = false
 		if nodes.clusterInfo[k].NodeInfo.Role == api.Role_MASTER {
 			id = k
@@ -339,66 +339,55 @@ func (s *Proxy) callMethod(ctx context.Context, client api.StaticFeatureDBWorker
 
 func (s *Proxy) tryNode(ctx context.Context, req interface{}) (interface{}, error) {
 	nodes, masterIndex := s.getNodesStatus()
-MASTER:
-	if masterIndex != "" {
+	for k := range nodes.clusterInfo {
+		if masterIndex == "" {
+			masterIndex = k
+		}
+
 		node, ok := nodes.clusterInfo[masterIndex]
 		if !ok {
-			return nil, util.ErrNotLeader
+			return nil, util.ErrNoLeader
 		}
-		resp, clusterInfo, err := s.callMethod(ctx, node.Client, req)
 
+		resp, clusterInfo, err := s.callMethod(ctx, node.Client, req)
 		if err != nil {
 			s.logger.Errorf("index %s Client IndexNew error %v", masterIndex, err)
 		}
 		nodes.nodesVisted[masterIndex] = true
-
-		if err == util.ErrNoLeader {
-			masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
-			goto MASTER
+		if resp == nil {
+			nodes.nodesVisted[masterIndex] = true
+			masterIndex = s.nextUnvisted(nodes)
+			continue
+		} else if clusterInfo == nil {
+			nodes.nodesVisted[masterIndex] = true
+			masterIndex = s.nextUnvisted(nodes)
+			continue
+		} else if err == util.ErrNotLeader {
+			if clusterInfo.Healthy {
+				masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
+			} else {
+				_, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
+				for _, v := range unhNodes {
+					nodes.nodesVisted[v] = true
+				}
+				masterIndex = s.nextUnvisted(nodes)
+			}
+			continue
 		} else if err == util.ErrNoHalf {
 			_, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
 			for _, v := range unhNodes {
 				nodes.nodesVisted[v] = true
 			}
 			masterIndex = s.nextUnvisted(nodes)
-			goto MASTER
-		} else if clusterInfo == nil {
-			nodes.nodesVisted[masterIndex] = true
-			masterIndex = s.nextUnvisted(nodes)
-			goto MASTER
+			continue
 		} else if clusterInfo.Role == api.Role_MASTER {
 			s.checkClusterInfo(clusterInfo.NodeInfo)
 			return resp, err
 		} else {
-
+			return resp, err
 		}
-
-		//if clusterInfo != nil {
-		//	ok, unhNodes := util.CheckLegalMaster(clusterInfo.NodeInfo)
-		//	if ok {
-		//		s.checkClusterInfo(clusterInfo.NodeInfo)
-		//		if clusterInfo.Role == api.Role_MASTER {
-		//			return resp, err
-		//		} else {
-		//			nodes.nodesVisted[masterIndex] = true
-		//			masterIndex = s.checkClusterInfo(clusterInfo.NodeInfo)
-		//			goto MASTER
-		//		}
-		//	} else {
-		//		for _, v := range unhNodes {
-		//			nodes.nodesVisted[v] = true
-		//		}
-		//		masterIndex = s.nextUnvisted(nodes)
-		//		goto MASTER
-		//	}
-		//} else {
-		//	nodes.nodesVisted[masterIndex] = true
-		//	masterIndex = s.nextUnvisted(nodes)
-		//	goto MASTER
-		//}
-	} else {
-		return nil, util.ErrNoLeader
 	}
+	return nil, util.ErrNoLeader
 }
 
 func (s *Proxy) IndexNew(ctx context.Context, request *api.IndexNewRequest) (*api.IndexNewResponse, error) {
@@ -412,9 +401,11 @@ func (s *Proxy) IndexDel(ctx context.Context, request *api.IndexDelRequest) (*ap
 }
 
 func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*api.IndexListResponse, error) {
-	for true {
+	var resp *api.IndexListResponse
+	var err error
+	for range s.clusterInfo {
 		node := s.roundroubin()
-		resp, err := node.Client.IndexList(ctx, request)
+		resp, err = node.Client.IndexList(ctx, request)
 		if err != nil {
 			s.logger.Errorf("IndexList error", err)
 		}
@@ -424,13 +415,10 @@ func (s *Proxy) IndexList(ctx context.Context, request *api.IndexListRequest) (*
 			}
 			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
 			return resp, err
-
-		} else {
-			//todo try again
-			return resp, err
 		}
+		continue
 	}
-	return nil, nil
+	return resp, err
 }
 
 func (s *Proxy) IndexTrain(_ context.Context, request *api.IndexTrainRequest) (*api.IndexTrainResponse, error) {
@@ -438,9 +426,11 @@ func (s *Proxy) IndexTrain(_ context.Context, request *api.IndexTrainRequest) (*
 }
 
 func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*api.IndexGetResponse, error) {
-	for true {
+	var resp *api.IndexGetResponse
+	var err error
+	for range s.clusterInfo {
 		node := s.roundroubin()
-		resp, err := node.Client.IndexGet(ctx, request)
+		resp, err = node.Client.IndexGet(ctx, request)
 		if err != nil {
 			s.logger.Errorf("IndexGet error", err)
 		}
@@ -450,11 +440,10 @@ func (s *Proxy) IndexGet(ctx context.Context, request *api.IndexGetRequest) (*ap
 			}
 			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
 			return resp, err
-		} else {
-			return resp, err
 		}
+		continue
 	}
-	return nil, nil
+	return resp, err
 }
 
 func (s *Proxy) FeatureBatchAdd(ctx context.Context, request *db.FeatureBatchAddRequest) (*api.FeatureBatchAddResponse, error) {
@@ -468,9 +457,11 @@ func (s *Proxy) FeatureBatchDelete(ctx context.Context, request *db.FeatureBatch
 }
 
 func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatchSearchRequest) (*api.FeatureBatchSearchResponse, error) {
-	for true {
+	var resp *api.FeatureBatchSearchResponse
+	var err error
+	for range s.clusterInfo {
 		node := s.roundroubin()
-		resp, err := node.Client.FeatureBatchSearch(ctx, request)
+		resp, err = node.Client.FeatureBatchSearch(ctx, request)
 		if err != nil {
 			s.logger.Errorf("FeatureBatchSearch error", err)
 		}
@@ -480,11 +471,10 @@ func (s *Proxy) FeatureBatchSearch(ctx context.Context, request *db.FeatureBatch
 			}
 			s.checkClusterInfo(resp.ClusterInfo.NodeInfo)
 			return resp, err
-		} else {
-			return resp, err
 		}
+		continue
 	}
-	return nil, nil
+	return resp, err
 }
 
 func (s *Proxy) FeatureUpdate(ctx context.Context, request *db.FeatureUpdateRequest) (*api.FeatureUpdateResponse, error) {

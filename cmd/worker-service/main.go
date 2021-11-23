@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	api "gitlab.bj.sensetime.com/mercury/protohub/api/engine-static-feature-db/index_rpc"
 	"os"
 	"os/signal"
@@ -18,7 +19,13 @@ import (
 	"strings"
 )
 
+var (
+	//	db         *gorm.DB
+	Id = flag.String("worker id ", "1", "worker id")
+)
+
 func main() {
+	flag.Parse()
 	endpoint := ":50052"
 	conn, err := net.Listen("tcp", endpoint)
 	if err != nil {
@@ -31,7 +38,7 @@ func main() {
 	if err != nil {
 		grpclog.Fatalf("NewWorkerWarpper err:%v\n", err)
 	}
-	err = worker.Init()
+	err = worker.Init(*Id)
 	if err != nil {
 		grpclog.Fatalf("worker.Init err:%v\n", err)
 	}

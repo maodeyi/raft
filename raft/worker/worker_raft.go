@@ -15,8 +15,6 @@ import (
 )
 
 type Raft interface {
-	IsMaster() bool
-	Healthy() bool
 	LeaderElect()
 	RoleNotify() <-chan api.Role
 	NotifyStart() <-chan bool
@@ -143,14 +141,13 @@ func (rf *WorkerRaft) subWokersStauts() {
 }
 
 //todo get workernumber from mongo
-func (rf *WorkerRaft) Init(worker Worker) error {
+func (rf *WorkerRaft) Init(worker Worker, Id string, domain string) error {
 	rf.peers = make(map[string]api.StaticFeatureDBWorkerServiceClient)
-	//todo
-	rf.sniffer = sniffer.NewSniffer("dns:///")
+	rf.sniffer = sniffer.NewSniffer(domain)
 	rf.sniffer.Start()
 	go rf.subWokersStauts()
 
-	rf.me = me
+	rf.me = Id
 	rf.worker = worker
 	rf.currentTerm = 0
 	rf.votedFor = ""
@@ -530,29 +527,12 @@ type NodeStatus struct {
 	healthy bool
 }
 
-func (rf *WorkerRaft) IsMaster() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.state != api.Role_MASTER {
-		return false
-	}
-	ok, _ := util.CheckLegalMaster(rf.clusterInfo)
-	return ok
-}
-
 func (rf *WorkerRaft) RoleNotify() <-chan api.Role {
 	return rf.isMasterCh
 }
 
 func (rf *WorkerRaft) NotifyStart() <-chan bool {
 	return rf.startCh
-}
-
-func (rf *WorkerRaft) Healthy() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	ok, _ := util.CheckLegalMaster(rf.clusterInfo)
-	return ok
 }
 
 func (rf *WorkerRaft) GetClusterInfo() *api.ClusterInfo {

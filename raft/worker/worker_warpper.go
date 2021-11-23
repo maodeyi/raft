@@ -26,8 +26,8 @@ func NewWorkerWarpper() (*WorkerWarpper, error) {
 	}, nil
 }
 
-func (s *WorkerWarpper) Init() error {
-	err := s.workerRaft.Init(s.b)
+func (s *WorkerWarpper) Init(Id string) error {
+	err := s.workerRaft.Init(s.b, Id, "dns:///")
 	if err != nil {
 		s.logger.Errorf("WorkerWarpper Init error %v", err)
 	}
